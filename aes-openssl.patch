@@ -1,0 +1,6337 @@
+diff --git a/arch/arm/Makefile b/arch/arm/Makefile
+index 70c424e..6b0c3a3 100644
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -259,6 +259,12 @@ drivers-$(CONFIG_OPROFILE)      += arch/arm/oprofile/
+ 
+ libs-y				:= arch/arm/lib/ $(libs-y)
+ 
++
++# Build aes-on-soc modules.
++core-m				+= arch/arm/cachelock/
++core-m				+= arch/arm/aes-openssl/
++#core-m				+= arch/arm/iram/
++
+ # Default target when executing plain make
+ ifeq ($(CONFIG_XIP_KERNEL),y)
+ KBUILD_IMAGE := xipImage
+diff --git a/arch/arm/aes-openssl/Makefile b/arch/arm/aes-openssl/Makefile
+new file mode 100644
+index 0000000..97f2ed6
+--- /dev/null
++++ b/arch/arm/aes-openssl/Makefile
+@@ -0,0 +1,8 @@
++#
++# Arch-specific CryptoAPI modules.
++#
++
++obj-m += aes-openssl.o
++
++aes-openssl-y := aes-arm.o aes-neon.o aes-glue.o aes-onsoc_glue.o
++
+diff --git a/arch/arm/aes-openssl/aes-arm.S b/arch/arm/aes-openssl/aes-arm.S
+new file mode 100644
+index 0000000..576c0da
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-arm.S
+@@ -0,0 +1,355 @@
++@ openssl implementation of AES in ARM assembly
++.text
++.code	32
++
++@ void AES_encrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global AES_encrypt
++.type   AES_encrypt,%function
++.align	5
++AES_encrypt:
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr	r10,=AES_Te
++	ldr	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_armv4_AES_encrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++	ldmia	sp!,{r4-r12,pc}
++.size	AES_encrypt,.-AES_encrypt
++
++.type   _armv4_AES_encrypt,%function
++.align	2
++_armv4_AES_encrypt:
++	str	lr,[sp,#-4]!		@ push lr
++	ldmia	r11!,{r4-r7}
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240-16]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0,lsr#16
++	mov	r0,r0,lsr#24
++.Lenc_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Te3[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Te2[s0>>8]
++	and	r8,lr,r1
++	ldr	r6,[r10,r9,lsl#2]	@ Te1[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Te0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Te1[s1>>16]
++	ldr	r8,[r10,r8,lsl#2]	@ Te3[s1>>0]
++	ldr	r9,[r10,r9,lsl#2]	@ Te2[s1>>8]
++	eor	r0,r0,r7,ror#8
++	ldr	r1,[r10,r1,lsl#2]	@ Te0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,ror#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r6,r9,ror#8
++	and	r9,lr,r2
++	ldr	r7,[r10,r7,lsl#2]	@ Te2[s2>>8]
++	eor	r1,r1,r4,ror#24
++	ldr	r8,[r10,r8,lsl#2]	@ Te1[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te3[s2>>0]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Te0[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,ror#8
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r6,r9,ror#16
++	and	r9,lr,r3,lsr#16	@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Te3[s3>>0]
++	eor	r2,r2,r5,ror#16
++	ldr	r8,[r10,r8,lsl#2]	@ Te2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te1[s3>>16]
++	eor	r0,r0,r7,ror#24
++	ldr	r7,[r11],#16
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Te0[s3>>24]
++	eor	r2,r2,r9,ror#8
++	ldr	r4,[r11,#-12]
++	eor	r3,r3,r6,ror#8
++
++	ldr	r5,[r11,#-8]
++	eor	r0,r0,r7
++	ldr	r6,[r11,#-4]
++	and	r7,lr,r0
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0,lsr#16
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Lenc_loop
++
++	add	r10,r10,#2
++
++	ldrb	r4,[r10,r7,lsl#2]	@ Te4[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldrb	r5,[r10,r8,lsl#2]	@ Te4[s0>>8]
++	and	r8,lr,r1
++	ldrb	r6,[r10,r9,lsl#2]	@ Te4[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldrb	r0,[r10,r0,lsl#2]	@ Te4[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s1>>16]
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s1>>0]
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s1>>8]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r1,[r10,r1,lsl#2]	@ Te4[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,lsl#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s2>>8]
++	eor	r1,r4,r1,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s2>>0]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r2,[r10,r2,lsl#2]	@ Te4[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r3,lsr#16	@ i2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s3>>0]
++	eor	r2,r5,r2,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s3>>16]
++	eor	r0,r7,r0,lsl#8
++	ldr	r7,[r11,#0]
++	ldrb	r3,[r10,r3,lsl#2]	@ Te4[s3>>24]
++	eor	r1,r1,r8,lsl#8
++	ldr	r4,[r11,#4]
++	eor	r2,r2,r9,lsl#16
++	ldr	r5,[r11,#8]
++	eor	r3,r6,r3,lsl#24
++	ldr	r6,[r11,#12]
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#2
++	ldr	pc,[sp],#4		@ pop and return
++.size	_armv4_AES_encrypt,.-_armv4_AES_encrypt
++
++
++@ void AES_decrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global AES_decrypt
++.type   AES_decrypt,%function
++.align	5
++AES_decrypt:
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr	r10,=AES_Td
++	ldr	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_armv4_AES_decrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++
++	ldmia	sp!,{r4-r12,pc}
++.size	AES_decrypt,.-AES_decrypt
++
++.type   _armv4_AES_decrypt,%function
++.align	2
++_armv4_AES_decrypt:
++	str	lr,[sp,#-4]!		@ push lr
++	ldmia	r11!,{r4-r7}
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240-16]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0,lsr#16
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0
++	mov	r0,r0,lsr#24
++.Ldec_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Td1[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Td2[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldr	r6,[r10,r9,lsl#2]	@ Td3[s0>>0]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Td0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Td3[s1>>0]
++	ldr	r8,[r10,r8,lsl#2]	@ Td1[s1>>16]
++	ldr	r9,[r10,r9,lsl#2]	@ Td2[s1>>8]
++	eor	r0,r0,r7,ror#24
++	ldr	r1,[r10,r1,lsl#2]	@ Td0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,ror#8
++	and	r8,lr,r2		@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r2,lsr#16
++	ldr	r7,[r10,r7,lsl#2]	@ Td2[s2>>8]
++	eor	r1,r1,r4,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td3[s2>>0]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td1[s2>>16]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Td0[s2>>24]
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r1,r1,r8,ror#24
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r3		@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Td1[s3>>16]
++	eor	r2,r2,r5,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td3[s3>>0]
++	eor	r0,r0,r7,ror#8
++	ldr	r7,[r11],#16
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Td0[s3>>24]
++	eor	r2,r2,r9,ror#24
++
++	ldr	r4,[r11,#-12]
++	eor	r0,r0,r7
++	ldr	r5,[r11,#-8]
++	eor	r3,r3,r6,ror#8
++	ldr	r6,[r11,#-4]
++	and	r7,lr,r0,lsr#16
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Ldec_loop
++
++	add	r10,r10,#1024
++
++	ldr	r5,[r10,#0]		@ prefetch Td4
++	ldr	r6,[r10,#32]
++	ldr	r4,[r10,#64]
++	ldr	r5,[r10,#96]
++	ldr	r6,[r10,#128]
++	ldr	r4,[r10,#160]
++	ldr	r5,[r10,#192]
++	ldr	r6,[r10,#224]
++
++	ldrb	r0,[r10,r0]		@ Td4[s0>>24]
++	ldrb	r4,[r10,r7]		@ Td4[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldrb	r5,[r10,r8]		@ Td4[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldrb	r6,[r10,r9]		@ Td4[s0>>0]
++	and	r9,lr,r1,lsr#8
++
++	ldrb	r7,[r10,r7]		@ Td4[s1>>0]
++	ldrb	r1,[r10,r1,lsr#24]	@ Td4[s1>>24]
++	ldrb	r8,[r10,r8]		@ Td4[s1>>16]
++	eor	r0,r7,r0,lsl#24
++	ldrb	r9,[r10,r9]		@ Td4[s1>>8]
++	eor	r1,r4,r1,lsl#8
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,lsl#8
++	and	r8,lr,r2		@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s2>>8]
++	eor	r6,r6,r9,lsl#8
++	ldrb	r8,[r10,r8]		@ Td4[s2>>0]
++	and	r9,lr,r2,lsr#16
++
++	ldrb	r2,[r10,r2,lsr#24]	@ Td4[s2>>24]
++	eor	r0,r0,r7,lsl#8
++	ldrb	r9,[r10,r9]		@ Td4[s2>>16]
++	eor	r1,r8,r1,lsl#16
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r2,r5,r2,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s3>>16]
++	eor	r6,r6,r9,lsl#16
++	ldrb	r8,[r10,r8]		@ Td4[s3>>8]
++	and	r9,lr,r3		@ i2
++
++	ldrb	r9,[r10,r9]		@ Td4[s3>>0]
++	ldrb	r3,[r10,r3,lsr#24]	@ Td4[s3>>24]
++	eor	r0,r0,r7,lsl#16
++	ldr	r7,[r11,#0]
++	eor	r1,r1,r8,lsl#8
++	ldr	r4,[r11,#4]
++	eor	r2,r9,r2,lsl#8
++	ldr	r5,[r11,#8]
++	eor	r3,r6,r3,lsl#24
++	ldr	r6,[r11,#12]
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#1024
++	ldr	pc,[sp],#4		@ pop and return
++.size	_armv4_AES_decrypt,.-_armv4_AES_decrypt
++.asciz	"AES for ARMv4, CRYPTOGAMS by <appro@openssl.org>"
++.align	2
+diff --git a/arch/arm/aes-openssl/aes-glue.c b/arch/arm/aes-openssl/aes-glue.c
+new file mode 100644
+index 0000000..483a785
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-glue.c
+@@ -0,0 +1,459 @@
++#define KERNEL
++
++#ifdef KERNEL
++#include <linux/string.h>
++#else
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#endif
++
++#include "aes.h"
++
++static const unsigned int orig_AES_Te[] = {
++  0xc66363a5, 0xf87c7c84, 0xee777799, 0xf67b7b8d,
++  0xfff2f20d, 0xd66b6bbd, 0xde6f6fb1, 0x91c5c554,
++  0x60303050, 0x02010103, 0xce6767a9, 0x562b2b7d,
++  0xe7fefe19, 0xb5d7d762, 0x4dababe6, 0xec76769a,
++  0x8fcaca45, 0x1f82829d, 0x89c9c940, 0xfa7d7d87,
++  0xeffafa15, 0xb25959eb, 0x8e4747c9, 0xfbf0f00b,
++  0x41adadec, 0xb3d4d467, 0x5fa2a2fd, 0x45afafea,
++  0x239c9cbf, 0x53a4a4f7, 0xe4727296, 0x9bc0c05b,
++  0x75b7b7c2, 0xe1fdfd1c, 0x3d9393ae, 0x4c26266a,
++  0x6c36365a, 0x7e3f3f41, 0xf5f7f702, 0x83cccc4f,
++  0x6834345c, 0x51a5a5f4, 0xd1e5e534, 0xf9f1f108,
++  0xe2717193, 0xabd8d873, 0x62313153, 0x2a15153f,
++  0x0804040c, 0x95c7c752, 0x46232365, 0x9dc3c35e,
++  0x30181828, 0x379696a1, 0x0a05050f, 0x2f9a9ab5,
++  0x0e070709, 0x24121236, 0x1b80809b, 0xdfe2e23d,
++  0xcdebeb26, 0x4e272769, 0x7fb2b2cd, 0xea75759f,
++  0x1209091b, 0x1d83839e, 0x582c2c74, 0x341a1a2e,
++  0x361b1b2d, 0xdc6e6eb2, 0xb45a5aee, 0x5ba0a0fb,
++  0xa45252f6, 0x763b3b4d, 0xb7d6d661, 0x7db3b3ce,
++  0x5229297b, 0xdde3e33e, 0x5e2f2f71, 0x13848497,
++  0xa65353f5, 0xb9d1d168, 0x00000000, 0xc1eded2c,
++  0x40202060, 0xe3fcfc1f, 0x79b1b1c8, 0xb65b5bed,
++  0xd46a6abe, 0x8dcbcb46, 0x67bebed9, 0x7239394b,
++  0x944a4ade, 0x984c4cd4, 0xb05858e8, 0x85cfcf4a,
++  0xbbd0d06b, 0xc5efef2a, 0x4faaaae5, 0xedfbfb16,
++  0x864343c5, 0x9a4d4dd7, 0x66333355, 0x11858594,
++  0x8a4545cf, 0xe9f9f910, 0x04020206, 0xfe7f7f81,
++  0xa05050f0, 0x783c3c44, 0x259f9fba, 0x4ba8a8e3,
++  0xa25151f3, 0x5da3a3fe, 0x804040c0, 0x058f8f8a,
++  0x3f9292ad, 0x219d9dbc, 0x70383848, 0xf1f5f504,
++  0x63bcbcdf, 0x77b6b6c1, 0xafdada75, 0x42212163,
++  0x20101030, 0xe5ffff1a, 0xfdf3f30e, 0xbfd2d26d,
++  0x81cdcd4c, 0x180c0c14, 0x26131335, 0xc3ecec2f,
++  0xbe5f5fe1, 0x359797a2, 0x884444cc, 0x2e171739,
++  0x93c4c457, 0x55a7a7f2, 0xfc7e7e82, 0x7a3d3d47,
++  0xc86464ac, 0xba5d5de7, 0x3219192b, 0xe6737395,
++  0xc06060a0, 0x19818198, 0x9e4f4fd1, 0xa3dcdc7f,
++  0x44222266, 0x542a2a7e, 0x3b9090ab, 0x0b888883,
++  0x8c4646ca, 0xc7eeee29, 0x6bb8b8d3, 0x2814143c,
++  0xa7dede79, 0xbc5e5ee2, 0x160b0b1d, 0xaddbdb76,
++  0xdbe0e03b, 0x64323256, 0x743a3a4e, 0x140a0a1e,
++  0x924949db, 0x0c06060a, 0x4824246c, 0xb85c5ce4,
++  0x9fc2c25d, 0xbdd3d36e, 0x43acacef, 0xc46262a6,
++  0x399191a8, 0x319595a4, 0xd3e4e437, 0xf279798b,
++  0xd5e7e732, 0x8bc8c843, 0x6e373759, 0xda6d6db7,
++  0x018d8d8c, 0xb1d5d564, 0x9c4e4ed2, 0x49a9a9e0,
++  0xd86c6cb4, 0xac5656fa, 0xf3f4f407, 0xcfeaea25,
++  0xca6565af, 0xf47a7a8e, 0x47aeaee9, 0x10080818,
++  0x6fbabad5, 0xf0787888, 0x4a25256f, 0x5c2e2e72,
++  0x381c1c24, 0x57a6a6f1, 0x73b4b4c7, 0x97c6c651,
++  0xcbe8e823, 0xa1dddd7c, 0xe874749c, 0x3e1f1f21,
++  0x964b4bdd, 0x61bdbddc, 0x0d8b8b86, 0x0f8a8a85,
++  0xe0707090, 0x7c3e3e42, 0x71b5b5c4, 0xcc6666aa,
++  0x904848d8, 0x06030305, 0xf7f6f601, 0x1c0e0e12,
++  0xc26161a3, 0x6a35355f, 0xae5757f9, 0x69b9b9d0,
++  0x17868691, 0x99c1c158, 0x3a1d1d27, 0x279e9eb9,
++  0xd9e1e138, 0xebf8f813, 0x2b9898b3, 0x22111133,
++  0xd26969bb, 0xa9d9d970, 0x078e8e89, 0x339494a7,
++  0x2d9b9bb6, 0x3c1e1e22, 0x15878792, 0xc9e9e920,
++  0x87cece49, 0xaa5555ff, 0x50282878, 0xa5dfdf7a,
++  0x038c8c8f, 0x59a1a1f8, 0x09898980, 0x1a0d0d17,
++  0x65bfbfda, 0xd7e6e631, 0x844242c6, 0xd06868b8,
++  0x824141c3, 0x299999b0, 0x5a2d2d77, 0x1e0f0f11,
++  0x7bb0b0cb, 0xa85454fc, 0x6dbbbbd6, 0x2c16163a
++};
++
++static const unsigned char orig_Te4[256] = {
++  0x63U, 0x7cU, 0x77U, 0x7bU, 0xf2U, 0x6bU, 0x6fU, 0xc5U,
++  0x30U, 0x01U, 0x67U, 0x2bU, 0xfeU, 0xd7U, 0xabU, 0x76U,
++  0xcaU, 0x82U, 0xc9U, 0x7dU, 0xfaU, 0x59U, 0x47U, 0xf0U,
++  0xadU, 0xd4U, 0xa2U, 0xafU, 0x9cU, 0xa4U, 0x72U, 0xc0U,
++  0xb7U, 0xfdU, 0x93U, 0x26U, 0x36U, 0x3fU, 0xf7U, 0xccU,
++  0x34U, 0xa5U, 0xe5U, 0xf1U, 0x71U, 0xd8U, 0x31U, 0x15U,
++  0x04U, 0xc7U, 0x23U, 0xc3U, 0x18U, 0x96U, 0x05U, 0x9aU,
++  0x07U, 0x12U, 0x80U, 0xe2U, 0xebU, 0x27U, 0xb2U, 0x75U,
++  0x09U, 0x83U, 0x2cU, 0x1aU, 0x1bU, 0x6eU, 0x5aU, 0xa0U,
++  0x52U, 0x3bU, 0xd6U, 0xb3U, 0x29U, 0xe3U, 0x2fU, 0x84U,
++  0x53U, 0xd1U, 0x00U, 0xedU, 0x20U, 0xfcU, 0xb1U, 0x5bU,
++  0x6aU, 0xcbU, 0xbeU, 0x39U, 0x4aU, 0x4cU, 0x58U, 0xcfU,
++  0xd0U, 0xefU, 0xaaU, 0xfbU, 0x43U, 0x4dU, 0x33U, 0x85U,
++  0x45U, 0xf9U, 0x02U, 0x7fU, 0x50U, 0x3cU, 0x9fU, 0xa8U,
++  0x51U, 0xa3U, 0x40U, 0x8fU, 0x92U, 0x9dU, 0x38U, 0xf5U,
++  0xbcU, 0xb6U, 0xdaU, 0x21U, 0x10U, 0xffU, 0xf3U, 0xd2U,
++  0xcdU, 0x0cU, 0x13U, 0xecU, 0x5fU, 0x97U, 0x44U, 0x17U,
++  0xc4U, 0xa7U, 0x7eU, 0x3dU, 0x64U, 0x5dU, 0x19U, 0x73U,
++  0x60U, 0x81U, 0x4fU, 0xdcU, 0x22U, 0x2aU, 0x90U, 0x88U,
++  0x46U, 0xeeU, 0xb8U, 0x14U, 0xdeU, 0x5eU, 0x0bU, 0xdbU,
++  0xe0U, 0x32U, 0x3aU, 0x0aU, 0x49U, 0x06U, 0x24U, 0x5cU,
++  0xc2U, 0xd3U, 0xacU, 0x62U, 0x91U, 0x95U, 0xe4U, 0x79U,
++  0xe7U, 0xc8U, 0x37U, 0x6dU, 0x8dU, 0xd5U, 0x4eU, 0xa9U,
++  0x6cU, 0x56U, 0xf4U, 0xeaU, 0x65U, 0x7aU, 0xaeU, 0x08U,
++  0xbaU, 0x78U, 0x25U, 0x2eU, 0x1cU, 0xa6U, 0xb4U, 0xc6U,
++  0xe8U, 0xddU, 0x74U, 0x1fU, 0x4bU, 0xbdU, 0x8bU, 0x8aU,
++  0x70U, 0x3eU, 0xb5U, 0x66U, 0x48U, 0x03U, 0xf6U, 0x0eU,
++  0x61U, 0x35U, 0x57U, 0xb9U, 0x86U, 0xc1U, 0x1dU, 0x9eU,
++  0xe1U, 0xf8U, 0x98U, 0x11U, 0x69U, 0xd9U, 0x8eU, 0x94U,
++  0x9bU, 0x1eU, 0x87U, 0xe9U, 0xceU, 0x55U, 0x28U, 0xdfU,
++  0x8cU, 0xa1U, 0x89U, 0x0dU, 0xbfU, 0xe6U, 0x42U, 0x68U,
++  0x41U, 0x99U, 0x2dU, 0x0fU, 0xb0U, 0x54U, 0xbbU, 0x16U
++};
++
++static const unsigned int orig_rcon[] = {
++  0x01000000, 0x02000000, 0x04000000, 0x08000000,
++  0x10000000, 0x20000000, 0x40000000, 0x80000000,
++  0x1B000000, 0x36000000, /* for 128-bit blocks, Rijndael never uses more than 10 rcon values
++			   */
++};
++
++static const unsigned int orig_AES_Td[] = {
++  0x51f4a750, 0x7e416553, 0x1a17a4c3, 0x3a275e96,
++  0x3bab6bcb, 0x1f9d45f1, 0xacfa58ab, 0x4be30393,
++  0x2030fa55, 0xad766df6, 0x88cc7691, 0xf5024c25,
++  0x4fe5d7fc, 0xc52acbd7, 0x26354480, 0xb562a38f,
++  0xdeb15a49, 0x25ba1b67, 0x45ea0e98, 0x5dfec0e1,
++  0xc32f7502, 0x814cf012, 0x8d4697a3, 0x6bd3f9c6,
++  0x038f5fe7, 0x15929c95, 0xbf6d7aeb, 0x955259da,
++  0xd4be832d, 0x587421d3, 0x49e06929, 0x8ec9c844,
++  0x75c2896a, 0xf48e7978, 0x99583e6b, 0x27b971dd,
++  0xbee14fb6, 0xf088ad17, 0xc920ac66, 0x7dce3ab4,
++  0x63df4a18, 0xe51a3182, 0x97513360, 0x62537f45,
++  0xb16477e0, 0xbb6bae84, 0xfe81a01c, 0xf9082b94,
++  0x70486858, 0x8f45fd19, 0x94de6c87, 0x527bf8b7,
++  0xab73d323, 0x724b02e2, 0xe31f8f57, 0x6655ab2a,
++  0xb2eb2807, 0x2fb5c203, 0x86c57b9a, 0xd33708a5,
++  0x302887f2, 0x23bfa5b2, 0x02036aba, 0xed16825c,
++  0x8acf1c2b, 0xa779b492, 0xf307f2f0, 0x4e69e2a1,
++  0x65daf4cd, 0x0605bed5, 0xd134621f, 0xc4a6fe8a,
++  0x342e539d, 0xa2f355a0, 0x058ae132, 0xa4f6eb75,
++  0x0b83ec39, 0x4060efaa, 0x5e719f06, 0xbd6e1051,
++  0x3e218af9, 0x96dd063d, 0xdd3e05ae, 0x4de6bd46,
++  0x91548db5, 0x71c45d05, 0x0406d46f, 0x605015ff,
++  0x1998fb24, 0xd6bde997, 0x894043cc, 0x67d99e77,
++  0xb0e842bd, 0x07898b88, 0xe7195b38, 0x79c8eedb,
++  0xa17c0a47, 0x7c420fe9, 0xf8841ec9, 0x00000000,
++  0x09808683, 0x322bed48, 0x1e1170ac, 0x6c5a724e,
++  0xfd0efffb, 0x0f853856, 0x3daed51e, 0x362d3927,
++  0x0a0fd964, 0x685ca621, 0x9b5b54d1, 0x24362e3a,
++  0x0c0a67b1, 0x9357e70f, 0xb4ee96d2, 0x1b9b919e,
++  0x80c0c54f, 0x61dc20a2, 0x5a774b69, 0x1c121a16,
++  0xe293ba0a, 0xc0a02ae5, 0x3c22e043, 0x121b171d,
++  0x0e090d0b, 0xf28bc7ad, 0x2db6a8b9, 0x141ea9c8,
++  0x57f11985, 0xaf75074c, 0xee99ddbb, 0xa37f60fd,
++  0xf701269f, 0x5c72f5bc, 0x44663bc5, 0x5bfb7e34,
++  0x8b432976, 0xcb23c6dc, 0xb6edfc68, 0xb8e4f163,
++  0xd731dcca, 0x42638510, 0x13972240, 0x84c61120,
++  0x854a247d, 0xd2bb3df8, 0xaef93211, 0xc729a16d,
++  0x1d9e2f4b, 0xdcb230f3, 0x0d8652ec, 0x77c1e3d0,
++  0x2bb3166c, 0xa970b999, 0x119448fa, 0x47e96422,
++  0xa8fc8cc4, 0xa0f03f1a, 0x567d2cd8, 0x223390ef,
++  0x87494ec7, 0xd938d1c1, 0x8ccaa2fe, 0x98d40b36,
++  0xa6f581cf, 0xa57ade28, 0xdab78e26, 0x3fadbfa4,
++  0x2c3a9de4, 0x5078920d, 0x6a5fcc9b, 0x547e4662,
++  0xf68d13c2, 0x90d8b8e8, 0x2e39f75e, 0x82c3aff5,
++  0x9f5d80be, 0x69d0937c, 0x6fd52da9, 0xcf2512b3,
++  0xc8ac993b, 0x10187da7, 0xe89c636e, 0xdb3bbb7b,
++  0xcd267809, 0x6e5918f4, 0xec9ab701, 0x834f9aa8,
++  0xe6956e65, 0xaaffe67e, 0x21bccf08, 0xef15e8e6,
++  0xbae79bd9, 0x4a6f36ce, 0xea9f09d4, 0x29b07cd6,
++  0x31a4b2af, 0x2a3f2331, 0xc6a59430, 0x35a266c0,
++  0x744ebc37, 0xfc82caa6, 0xe090d0b0, 0x33a7d815,
++  0xf104984a, 0x41ecdaf7, 0x7fcd500e, 0x1791f62f,
++  0x764dd68d, 0x43efb04d, 0xccaa4d54, 0xe49604df,
++  0x9ed1b5e3, 0x4c6a881b, 0xc12c1fb8, 0x4665517f,
++  0x9d5eea04, 0x018c355d, 0xfa877473, 0xfb0b412e,
++  0xb3671d5a, 0x92dbd252, 0xe9105633, 0x6dd64713,
++  0x9ad7618c, 0x37a10c7a, 0x59f8148e, 0xeb133c89,
++  0xcea927ee, 0xb761c935, 0xe11ce5ed, 0x7a47b13c,
++  0x9cd2df59, 0x55f2733f, 0x1814ce79, 0x73c737bf,
++  0x53f7cdea, 0x5ffdaa5b, 0xdf3d6f14, 0x7844db86,
++  0xcaaff381, 0xb968c43e, 0x3824342c, 0xc2a3405f,
++  0x161dc372, 0xbce2250c, 0x283c498b, 0xff0d9541,
++  0x39a80171, 0x080cb3de, 0xd8b4e49c, 0x6456c190,
++  0x7bcb8461, 0xd532b670, 0x486c5c74, 0xd0b85742,
++};
++
++static const unsigned char orig_Td4[256] = {
++  0x52U, 0x09U, 0x6aU, 0xd5U, 0x30U, 0x36U, 0xa5U, 0x38U,
++  0xbfU, 0x40U, 0xa3U, 0x9eU, 0x81U, 0xf3U, 0xd7U, 0xfbU,
++  0x7cU, 0xe3U, 0x39U, 0x82U, 0x9bU, 0x2fU, 0xffU, 0x87U,
++  0x34U, 0x8eU, 0x43U, 0x44U, 0xc4U, 0xdeU, 0xe9U, 0xcbU,
++  0x54U, 0x7bU, 0x94U, 0x32U, 0xa6U, 0xc2U, 0x23U, 0x3dU,
++  0xeeU, 0x4cU, 0x95U, 0x0bU, 0x42U, 0xfaU, 0xc3U, 0x4eU,
++  0x08U, 0x2eU, 0xa1U, 0x66U, 0x28U, 0xd9U, 0x24U, 0xb2U,
++  0x76U, 0x5bU, 0xa2U, 0x49U, 0x6dU, 0x8bU, 0xd1U, 0x25U,
++  0x72U, 0xf8U, 0xf6U, 0x64U, 0x86U, 0x68U, 0x98U, 0x16U,
++  0xd4U, 0xa4U, 0x5cU, 0xccU, 0x5dU, 0x65U, 0xb6U, 0x92U,
++  0x6cU, 0x70U, 0x48U, 0x50U, 0xfdU, 0xedU, 0xb9U, 0xdaU,
++  0x5eU, 0x15U, 0x46U, 0x57U, 0xa7U, 0x8dU, 0x9dU, 0x84U,
++  0x90U, 0xd8U, 0xabU, 0x00U, 0x8cU, 0xbcU, 0xd3U, 0x0aU,
++  0xf7U, 0xe4U, 0x58U, 0x05U, 0xb8U, 0xb3U, 0x45U, 0x06U,
++  0xd0U, 0x2cU, 0x1eU, 0x8fU, 0xcaU, 0x3fU, 0x0fU, 0x02U,
++  0xc1U, 0xafU, 0xbdU, 0x03U, 0x01U, 0x13U, 0x8aU, 0x6bU,
++  0x3aU, 0x91U, 0x11U, 0x41U, 0x4fU, 0x67U, 0xdcU, 0xeaU,
++  0x97U, 0xf2U, 0xcfU, 0xceU, 0xf0U, 0xb4U, 0xe6U, 0x73U,
++  0x96U, 0xacU, 0x74U, 0x22U, 0xe7U, 0xadU, 0x35U, 0x85U,
++  0xe2U, 0xf9U, 0x37U, 0xe8U, 0x1cU, 0x75U, 0xdfU, 0x6eU,
++  0x47U, 0xf1U, 0x1aU, 0x71U, 0x1dU, 0x29U, 0xc5U, 0x89U,
++  0x6fU, 0xb7U, 0x62U, 0x0eU, 0xaaU, 0x18U, 0xbeU, 0x1bU,
++  0xfcU, 0x56U, 0x3eU, 0x4bU, 0xc6U, 0xd2U, 0x79U, 0x20U,
++  0x9aU, 0xdbU, 0xc0U, 0xfeU, 0x78U, 0xcdU, 0x5aU, 0xf4U,
++  0x1fU, 0xddU, 0xa8U, 0x33U, 0x88U, 0x07U, 0xc7U, 0x31U,
++  0xb1U, 0x12U, 0x10U, 0x59U, 0x27U, 0x80U, 0xecU, 0x5fU,
++  0x60U, 0x51U, 0x7fU, 0xa9U, 0x19U, 0xb5U, 0x4aU, 0x0dU,
++  0x2dU, 0xe5U, 0x7aU, 0x9fU, 0x93U, 0xc9U, 0x9cU, 0xefU,
++  0xa0U, 0xe0U, 0x3bU, 0x4dU, 0xaeU, 0x2aU, 0xf5U, 0xb0U,
++  0xc8U, 0xebU, 0xbbU, 0x3cU, 0x83U, 0x53U, 0x99U, 0x61U,
++  0x17U, 0x2bU, 0x04U, 0x7eU, 0xbaU, 0x77U, 0xd6U, 0x26U,
++  0xe1U, 0x69U, 0x14U, 0x63U, 0x55U, 0x21U, 0x0cU, 0x7dU,
++};
++
++unsigned char *AES_Te = NULL;
++unsigned char *Te4 = NULL;
++unsigned int *rcon = NULL;
++unsigned char *AES_Td = NULL;
++unsigned char *Td4 = NULL;
++
++/* to support the possibility of hosting all the tables in a specific memory
++ * location, this routine takes as input a pointer to a contiguous chunk of
++ * memory, and then fills in the tables...
++ */
++int AES_init_tables(unsigned char *buffer, size_t len)
++{
++	if (len < (2 * 1024) + (2 * 256) + 40) {
++		return 0;
++	}
++
++	memcpy(buffer, (void *)orig_AES_Te, 1024);
++	AES_Te = buffer;
++	buffer += 1024;
++	memcpy(buffer, (void *)orig_Te4, 256);
++	Te4 = buffer;
++	buffer += 256;
++	memcpy(buffer, (void *)orig_rcon, 40);
++	rcon = (unsigned int *)buffer;
++	buffer += 40;
++	memcpy(buffer, (void *)orig_AES_Td, 1024);
++	AES_Td = buffer;
++	buffer += 1024;
++	memcpy(buffer, (void *)orig_Td4, 256);
++	Td4 = buffer;
++	return 1;
++}
++
++void AES_neon_cbc_encrypt(struct aes_ctx *ctx, unsigned char *out,
++                          const unsigned char *in, size_t len,
++                          unsigned char *ivec)
++{
++	size_t n;
++	const unsigned char *iv = ivec;
++	unsigned int *key = ctx->key_enc;
++
++	while (len) {
++		for(n=0; n<16 && n<len; ++n)
++			out[n] = in[n] ^ iv[n];
++		for(; n<16; ++n)
++			out[n] = iv[n];
++		neon_AES_encrypt(out, out, key);
++		iv = out;
++		if (len<=16) break;
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++	memcpy(ivec,iv,16);
++}
++
++void AES_cbc_enc(struct aes_ctx *ctx, unsigned char *out,
++                 const unsigned char *in, size_t len, unsigned char *ivec)
++{
++	size_t n;
++	const unsigned char *iv = ivec;
++	unsigned int *key = ctx->key_enc;
++
++	while (len) {
++		for(n=0; n<16 && n<len; ++n)
++			out[n] = in[n] ^ iv[n];
++		for(; n<16; ++n)
++			out[n] = iv[n];
++		AES_encrypt(out, out, key);
++		iv = out;
++		if (len<=16) break;
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++	memcpy(ivec,iv,16);
++}
++
++void AES_neon_cbc_decrypt(struct aes_ctx *ctx, unsigned char *out, 
++                          const unsigned char *in, size_t len,
++                          unsigned char *ivec)
++{
++	size_t n;
++	union { size_t align; unsigned char c[16]; } tmp;
++	unsigned int *key = ctx->key_dec;
++
++	while (len) {
++		unsigned char c;
++		neon_AES_decrypt(in, tmp.c, key);
++		for(n=0; n<16 && n<len; ++n) {
++			c = in[n];
++			out[n] = tmp.c[n] ^ ivec[n];
++			ivec[n] = c;
++		}
++		if (len<=16) {
++			for (; n<16; ++n)
++				ivec[n] = in[n];
++			break;
++		}
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++}
++
++
++void AES_cbc_dec(struct aes_ctx *ctx, unsigned char *out,
++                 const unsigned char *in, size_t len, unsigned char *ivec)
++{
++	size_t n;
++	union { size_t align; unsigned char c[16]; } tmp;
++	unsigned int *key = ctx->key_dec;
++
++	while (len) {
++		unsigned char c;
++		AES_decrypt(in, tmp.c, key);
++		for(n=0; n<16 && n<len; ++n) {
++			c = in[n];
++			out[n] = tmp.c[n] ^ ivec[n];
++			ivec[n] = c;
++		}
++		if (len<=16) {
++			for (; n<16; ++n)
++				ivec[n] = in[n];
++			break;
++		}
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++}
++
++void AES_set_key(struct aes_ctx *ctx, const unsigned char *userKey,
++                 unsigned int key_len)
++{
++	unsigned int *key;
++	key = ctx->key_enc;
++	AES_set_encrypt_key(userKey, key);
++	key = ctx->key_dec;
++	AES_set_decrypt_key(userKey, key);
++}
++
++/**
++ * Expand the cipher key into the encryption key schedule.
++ */
++int AES_set_encrypt_key(const unsigned char *userKey, unsigned int *key)
++{
++	unsigned int *rk;
++	int i = 0;
++	unsigned int temp;
++
++	if (!userKey || !key)
++		return -1;
++
++	rk = key;
++
++	//key->rounds = 10;
++
++	rk[0] = GETU32(userKey     );
++	rk[1] = GETU32(userKey +  4);
++	rk[2] = GETU32(userKey +  8);
++	rk[3] = GETU32(userKey + 12);
++
++	while (1) {
++		temp  = rk[3];
++		rk[4] = rk[0] ^
++		        (Te4[(temp >> 16) & 0xff] << 24) ^
++		        (Te4[(temp >>  8) & 0xff] << 16) ^
++		        (Te4[(temp      ) & 0xff] << 8) ^
++		        (Te4[(temp >> 24)       ]) ^
++		        rcon[i];
++		rk[5] = rk[1] ^ rk[4];
++		rk[6] = rk[2] ^ rk[5];
++		rk[7] = rk[3] ^ rk[6];
++		if (++i == 10) {
++			break;
++		}
++		rk += 4;
++	}
++
++	return 0;
++}
++
++/**
++ * Expand the cipher key into the decryption key schedule.
++ */
++int AES_set_decrypt_key(const unsigned char *userKey, unsigned int *key)
++{
++	unsigned int *rk;
++	int i, j, status;
++	unsigned int temp;
++
++	/* First, start with an encryption schedule. */
++	status = AES_set_encrypt_key(userKey, key);
++	if (status < 0)
++		return status;
++
++	rk = key;
++
++	/* Invert the order of the round keys: */
++	for (i = 0, j = 40; i < j; i += 4, j -= 4) {
++		temp = rk[i    ]; rk[i    ] = rk[j    ]; rk[j    ] = temp;
++		temp = rk[i + 1]; rk[i + 1] = rk[j + 1]; rk[j + 1] = temp;
++		temp = rk[i + 2]; rk[i + 2] = rk[j + 2]; rk[j + 2] = temp;
++		temp = rk[i + 3]; rk[i + 3] = rk[j + 3]; rk[j + 3] = temp;
++	}
++
++	/* Apply the inverse MixColumn transform to all round keys, except for the
++	 * first and the last: */
++	for (i = 1; i < 10; i++) {
++		rk += 4;
++		for (j = 0; j < 4; j++) {
++			unsigned int tp1, tp2, tp4, tp8, tp9, tpb, tpd, tpe, m;
++
++			tp1 = rk[j];
++			m = tp1 & 0x80808080;
++			tp2 = ((tp1 & 0x7f7f7f7f) << 1) ^
++			      ((m - (m >> 7)) & 0x1b1b1b1b);
++			m = tp2 & 0x80808080;
++			tp4 = ((tp2 & 0x7f7f7f7f) << 1) ^
++			      ((m - (m >> 7)) & 0x1b1b1b1b);
++			m = tp4 & 0x80808080;
++			tp8 = ((tp4 & 0x7f7f7f7f) << 1) ^
++			      ((m - (m >> 7)) & 0x1b1b1b1b);
++			tp9 = tp8 ^ tp1;
++			tpb = tp9 ^ tp2;
++			tpd = tp9 ^ tp4;
++			tpe = tp8 ^ tp4 ^ tp2;
++			rk[j] = tpe ^ (tpd >> 16) ^ (tpd << 16) ^
++			        (tp9 >> 8) ^ (tp9 << 24) ^
++			        (tpb >> 24) ^ (tpb << 8);
++		}
++	}
++
++	return 0;
++}
+diff --git a/arch/arm/aes-openssl/aes-neon.S b/arch/arm/aes-openssl/aes-neon.S
+new file mode 100644
+index 0000000..bce3fd4
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-neon.S
+@@ -0,0 +1,836 @@
++.text
++.code	32
++
++@ void neon_AES_encrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global neon_AES_encrypt
++.type   neon_AES_encrypt,%function
++.align	5
++neon_AES_encrypt:
++	sub	r3,pc,#8		@ neon_AES_encrypt
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr 	r10,=AES_Te
++	ldr 	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_neon_AES_encrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++	ldmia	sp!,{r4-r12,pc}
++.size	neon_AES_encrypt,.-neon_AES_encrypt
++
++.type   _neon_AES_encrypt,%function
++.align	2
++_neon_AES_encrypt:
++	str     lr,[sp,#-4]!            @ push lr
++	vmov.i64 d22, #0
++	bl	load_next_key
++	mov	r8, r7
++	mov	r7, r6
++	mov	r6, r5
++	mov	r5, r4
++	mov	r4, r8
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0,lsr#16
++	mov	r0,r0,lsr#24
++.Lenc_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Te3[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Te2[s0>>8]
++	and	r8,lr,r1
++	ldr	r6,[r10,r9,lsl#2]	@ Te1[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Te0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Te1[s1>>16]
++	ldr	r8,[r10,r8,lsl#2]	@ Te3[s1>>0]
++	ldr	r9,[r10,r9,lsl#2]	@ Te2[s1>>8]
++	eor	r0,r0,r7,ror#8
++	ldr	r1,[r10,r1,lsl#2]	@ Te0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,ror#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r6,r9,ror#8
++	and	r9,lr,r2
++	ldr	r7,[r10,r7,lsl#2]	@ Te2[s2>>8]
++	eor	r1,r1,r4,ror#24
++	ldr	r8,[r10,r8,lsl#2]	@ Te1[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te3[s2>>0]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Te0[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,ror#8
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r6,r9,ror#16
++	and	r9,lr,r3,lsr#16	@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Te3[s3>>0]
++	eor	r2,r2,r5,ror#16
++	ldr	r8,[r10,r8,lsl#2]	@ Te2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te1[s3>>16]
++	eor	r0,r0,r7,ror#24
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Te0[s3>>24]
++	eor	r2,r2,r9,ror#8
++	eor	r3,r3,r6,ror#8
++	
++	@ read next key from neon
++	mov	r11,lr
++	bl	load_next_key
++	mov	lr,r11
++	eor	r0,r0,r7
++	and	r7,lr,r0
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0,lsr#16
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Lenc_loop
++
++	add	r10,r10,#2
++
++	ldrb	r4,[r10,r7,lsl#2]	@ Te4[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldrb	r5,[r10,r8,lsl#2]	@ Te4[s0>>8]
++	and	r8,lr,r1
++	ldrb	r6,[r10,r9,lsl#2]	@ Te4[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldrb	r0,[r10,r0,lsl#2]	@ Te4[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s1>>16]
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s1>>0]
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s1>>8]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r1,[r10,r1,lsl#2]	@ Te4[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,lsl#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s2>>8]
++	eor	r1,r4,r1,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s2>>0]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r2,[r10,r2,lsl#2]	@ Te4[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r3,lsr#16	@ i2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s3>>0]
++	eor	r2,r5,r2,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s3>>16]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r3,[r10,r3,lsl#2]	@ Te4[s3>>24]
++	eor	r1,r1,r8,lsl#8
++	eor	r2,r2,r9,lsl#16
++	eor	r3,r6,r3,lsl#24
++	bl 	load_next_key
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#2
++        ldr     pc,[sp],#4              @ pop and return
++.size	_neon_AES_encrypt,.-_neon_AES_encrypt
++
++
++.macro	copy_from_neon dreg1, dreg2
++	vmov	r7, r4, \dreg1
++	vmov	r5, r6, \dreg2
++.endm
++
++.macro	copy_to_neon dreg1, dreg2
++	vmov	\dreg1, r0, r1
++	vmov	\dreg2, r2, r3
++.endm	
++
++@
++@ unsigned int fetch_key_idx(int index)
++@
++@ does not follow ARM calling conventions
++@ r11 = index (input)
++@ r0 = result (output)
++@ r1 = (temp reg, overwritten)
++@
++.global fetch_key_idx
++.type	fetch_key_idx, %function
++.align	5	
++fetch_key_idx:
++	mov	r0, pc
++	add	r0, r0, #12   @ #12=3 instructions. r0 should now point to fetch_key_base
++	lsl	r1, r11, #3   @ r1 = idx * 8
++	add	r0, r0, r1    @ r0 = (idx * 8) + 12
++	mov	pc, r0
++.fetch_key_base:
++	vmov.32	r0, d0[0]
++	mov	pc, lr
++	vmov.32	r0, d0[1]
++	mov	pc, lr
++	vmov.32	r0, d1[0]
++	mov	pc, lr
++	vmov.32	r0, d1[1]
++	mov	pc, lr
++	vmov.32	r0, d2[0]
++	mov	pc, lr
++	vmov.32	r0, d2[1]
++	mov	pc, lr
++	vmov.32	r0, d3[0]
++	mov	pc, lr
++	vmov.32	r0, d3[1]
++	mov	pc, lr
++	vmov.32	r0, d4[0]
++	mov	pc, lr
++	vmov.32	r0, d4[1]
++	mov	pc, lr
++	vmov.32	r0, d5[0]
++	mov	pc, lr
++	vmov.32	r0, d5[1]
++	mov	pc, lr
++	vmov.32	r0, d6[0]
++	mov	pc, lr
++	vmov.32	r0, d6[1]
++	mov	pc, lr
++	vmov.32	r0, d7[0]
++	mov	pc, lr
++	vmov.32	r0, d7[1]
++	mov	pc, lr
++	vmov.32	r0, d8[0]
++	mov	pc, lr
++	vmov.32	r0, d8[1]
++	mov	pc, lr
++	vmov.32	r0, d9[0]
++	mov	pc, lr
++	vmov.32	r0, d9[1]
++	mov	pc, lr
++	vmov.32	r0, d10[0]
++	mov	pc, lr
++	vmov.32	r0, d10[1]
++	mov	pc, lr
++	vmov.32	r0, d11[0]
++	mov	pc, lr
++	vmov.32	r0, d11[1]
++	mov	pc, lr
++	vmov.32	r0, d12[0]
++	mov	pc, lr
++	vmov.32	r0, d12[1]
++	mov	pc, lr
++	vmov.32	r0, d13[0]
++	mov	pc, lr
++	vmov.32	r0, d13[1]
++	mov	pc, lr
++	vmov.32	r0, d14[0]
++	mov	pc, lr
++	vmov.32	r0, d14[1]
++	mov	pc, lr
++	vmov.32	r0, d15[0]
++	mov	pc, lr
++	vmov.32	r0, d15[1]
++	mov	pc, lr
++	vmov.32	r0, d16[0]
++	mov	pc, lr
++	vmov.32	r0, d16[1]
++	mov	pc, lr
++	vmov.32	r0, d17[0]
++	mov	pc, lr
++	vmov.32	r0, d17[1]
++	mov	pc, lr
++	vmov.32	r0, d18[0]
++	mov	pc, lr
++	vmov.32	r0, d18[1]
++	mov	pc, lr
++	vmov.32	r0, d19[0]
++	mov	pc, lr
++	vmov.32	r0, d19[1]
++	mov	pc, lr
++	vmov.32	r0, d20[0]
++	mov	pc, lr
++	vmov.32	r0, d20[1]
++	mov	pc, lr
++	vmov.32	r0, d21[0]
++	mov	pc, lr
++	vmov.32	r0, d21[1]
++	mov	pc, lr
++.size	fetch_key_idx,.-fetch_key_idx
++	
++@
++@ unsigned int store_key_idx(int index)
++@
++@ does not follow ARM calling conventions
++@ r11 = index (input)
++@ r0 = value (input)
++@ r1,r2 = (temp regs, overwritten)
++@
++.global store_key_idx
++.type	store_key_idx, %function
++.align	5	
++store_key_idx:
++	mov	r1, pc
++	add	r1, r1, #12   @ #12=3 instructions. r0 should now point to store_key_base
++	lsl	r2, r11, #3   @ r1 = idx * 8
++	add	r1, r1, r2    @ r0 = (idx * 8) + 12
++	mov	pc, r1
++.store_key_base:
++	vmov.32	d0[0], r0
++	mov	pc, lr
++	vmov.32	d0[1], r0
++	mov	pc, lr
++	vmov.32	d1[0], r0
++	mov	pc, lr
++	vmov.32	d1[1], r0
++	mov	pc, lr
++	vmov.32	d2[0], r0
++	mov	pc, lr
++	vmov.32	d2[1], r0
++	mov	pc, lr
++	vmov.32	d3[0], r0
++	mov	pc, lr
++	vmov.32	d3[1], r0
++	mov	pc, lr
++	vmov.32	d4[0], r0
++	mov	pc, lr
++	vmov.32	d4[1], r0
++	mov	pc, lr
++	vmov.32	d5[0], r0
++	mov	pc, lr
++	vmov.32	d5[1], r0
++	mov	pc, lr
++	vmov.32	d6[0], r0
++	mov	pc, lr
++	vmov.32	d6[1], r0
++	mov	pc, lr
++	vmov.32	d7[0], r0
++	mov	pc, lr
++	vmov.32	d7[1], r0
++	mov	pc, lr
++	vmov.32	d8[0], r0
++	mov	pc, lr
++	vmov.32	d8[1], r0
++	mov	pc, lr
++	vmov.32	d9[0], r0
++	mov	pc, lr
++	vmov.32	d9[1], r0
++	mov	pc, lr
++	vmov.32	d10[0], r0
++	mov	pc, lr
++	vmov.32	d10[1], r0
++	mov	pc, lr
++	vmov.32	d11[0], r0
++	mov	pc, lr
++	vmov.32	d11[1], r0
++	mov	pc, lr
++	vmov.32	d12[0], r0
++	mov	pc, lr
++	vmov.32	d12[1], r0
++	mov	pc, lr
++	vmov.32	d13[0], r0
++	mov	pc, lr
++	vmov.32	d13[1], r0
++	mov	pc, lr
++	vmov.32	d14[0], r0
++	mov	pc, lr
++	vmov.32	d14[1], r0
++	mov	pc, lr
++	vmov.32	d15[0], r0
++	mov	pc, lr
++	vmov.32	d15[1], r0
++	mov	pc, lr
++	vmov.32	d16[0], r0
++	mov	pc, lr
++	vmov.32	d16[1], r0
++	mov	pc, lr
++	vmov.32	d17[0], r0
++	mov	pc, lr
++	vmov.32	d17[1], r0
++	mov	pc, lr
++	vmov.32	d18[0], r0
++	mov	pc, lr
++	vmov.32	d18[1], r0
++	mov	pc, lr
++	vmov.32	d19[0], r0
++	mov	pc, lr
++	vmov.32	d19[1], r0
++	mov	pc, lr
++	vmov.32	d20[0], r0
++	mov	pc, lr
++	vmov.32	d20[1], r0
++	mov	pc, lr
++	vmov.32	d21[0], r0
++	mov	pc, lr
++	vmov.32	d21[1], r0
++	mov	pc, lr
++	.size	store_key_idx,.-store_key_idx
++	
++@	
++@ void load_next_key(int index)
++@
++@ WARNING: does not follow the ARM ABI calling conventions
++@ index is passed in to the function in d22[0]
++@ this function over-writes r4 thru r7 (and leaves it's results there)
++@
++.global	load_next_key
++.type	load_next_key, %function
++.align	5	
++load_next_key:
++	mov		r4, pc
++	add		r4, r4, #36   @ #36 = 9 instructions. r4 should now point to next_key_base
++	vmov.32		r5, d22[0]
++	vmov.i32	d23,#1
++	vadd.i32	d22, d22, d23
++	mov		r6, r5
++	lsl		r5, r5, #2
++	lsl		r6, r6, #3
++	add		r6, r6, r5
++	add		r4, r4, r6
++	mov		pc, r4
++.next_key_base:
++	copy_from_neon	d0, d1
++	mov		pc, lr
++	copy_from_neon	d2, d3
++	mov		pc,lr
++	copy_from_neon	d4, d5
++	mov		pc,lr
++	copy_from_neon	d6, d7
++	mov		pc,lr
++	copy_from_neon	d8, d9
++	mov		pc,lr
++	copy_from_neon	d10, d11
++	mov		pc,lr
++	copy_from_neon	d12, d13
++	mov		pc,lr
++	copy_from_neon	d14, d15
++	mov		pc,lr	
++	copy_from_neon	d16, d17
++	mov		pc,lr
++	copy_from_neon	d18, d19
++	mov		pc,lr
++	copy_from_neon	d20, d21
++	mov		pc,lr
++.size	load_next_key,.-load_next_key
++
++@	
++@ void save_next_key(int idx)
++@
++@ WARNING: does not follow the ARM ABI calling conventions.
++@ input parameters are passed in using r0 thru r3. index is passed in r12.
++@ r5, r7, r8, r9 are over-written with saving by this call.
++@ this function saves values to the NEON registers.
++@
++.global	save_next_key
++.type	save_next_key, %function
++.align	5	
++save_next_key:
++	mov		r5, pc
++	add		r5, r5, #28   @ #28=7 instructions. r5 should now point to save_key_base
++	rsb		r7, r12, #10  @ r7 = 10 - r12
++	mov		r8, r7
++	lsl		r7, r7, #2    @ r7 = idx * 4
++	lsl		r8, r8, #3    @ r8 = idx * 8
++	add		r8, r8, r7    @ r8 = (idx * 4) + (idx * 8)
++	add		r5, r5, r8
++	mov		pc, r5
++.save_key_base:
++	copy_to_neon	d0, d1
++	mov		pc,lr
++	copy_to_neon	d2, d3
++	mov		pc,lr
++	copy_to_neon	d4, d5
++	mov		pc,lr
++	copy_to_neon	d6, d7
++	mov		pc,lr
++	copy_to_neon	d8, d9
++	mov		pc,lr
++	copy_to_neon	d10, d11
++	mov		pc,lr
++	copy_to_neon	d12, d13
++	mov		pc,lr
++	copy_to_neon	d14, d15
++	mov		pc,lr
++	copy_to_neon	d16, d17
++	mov		pc,lr
++	copy_to_neon	d18, d19
++	mov		pc,lr
++	copy_to_neon	d20, d21
++	mov		pc,lr
++.size	save_next_key,.-save_next_key
++	
++.global neon_AES_set_encrypt_key
++.type   neon_AES_set_encrypt_key,%function
++.align	5
++neon_AES_set_encrypt_key:
++	sub	r3,pc,#8		@ AES_set_encrypt_key
++	teq	r0,#0
++	moveq	r0,#-1
++	beq	.Labrt
++	teq	r2,#0
++	moveq	r0,#-1
++	beq	.Labrt
++
++	teq	r1,#128
++	movne	r0,#-1
++	bne	.Labrt
++
++.Lok:	stmdb   sp!,{r4-r12,lr}
++	ldr	r10,=AES_Te
++	ldr	r10,[r10,#0]
++	add	r10,r10,#1024
++	@sub	r10,r3,#neon_AES_set_encrypt_key-AES_Te-1024	@ Te4
++
++	mov	r12,r0		@ inp
++	mov	lr,r1			@ bits
++	mov	r11,r2			@ key
++
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	mov	r12,#10
++	str	r12,[r11,#240]
++	add	r6,r10,#256			@ rcon
++	bl	save_next_key
++	subs	r12,r12,#1
++	mov	lr,#255
++
++.L128_loop:
++	and	r5,lr,r3,lsr#24
++	and	r7,lr,r3,lsr#16
++	ldrb	r5,[r10,r5]
++	and	r8,lr,r3,lsr#8
++	ldrb	r7,[r10,r7]
++	and	r9,lr,r3
++	ldrb	r8,[r10,r8]
++	orr	r5,r5,r7,lsl#24
++	ldrb	r9,[r10,r9]
++	orr	r5,r5,r8,lsl#16
++	ldr	r4,[r6],#4			@ rcon[i++]
++	orr	r5,r5,r9,lsl#8
++	eor	r5,r5,r4
++	eor	r0,r0,r5			@ rk[4]=rk[0]^...
++	eor	r1,r1,r0			@ rk[5]=rk[1]^rk[4]
++	eor	r2,r2,r1			@ rk[6]=rk[2]^rk[5]
++	eor	r3,r3,r2			@ rk[7]=rk[3]^rk[6]
++	bl	save_next_key
++	mov	lr,#255
++	subs	r12,r12,#1
++	bpl	.L128_loop
++	mov	r2,r11
++
++.Ldone:	mov	r0,#0
++	ldmia   sp!,{r4-r12,lr}
++.Labrt:	tst	lr,#1
++	moveq	pc,lr				@ be binary compatible with V4, yet
++	.word	0xe12fff1e			@ interoperable with Thumb ISA:-)
++.size	neon_AES_set_encrypt_key,.-neon_AES_set_encrypt_key
++
++.global neon_AES_set_decrypt_key
++.type   neon_AES_set_decrypt_key,%function
++.align	5
++neon_AES_set_decrypt_key:
++	stmdb   sp!,{r4-r12,lr}
++	bl	neon_AES_set_encrypt_key
++	teq	r0,#0
++	bne	.Labrt
++
++	ldr	r12,[r2,#240]		@ AES_set_encrypt_key preserves r2,
++	mov	r11,r2			@ which is AES_KEY *key
++	
++	@ reverse the order of the key schedule, using NEON
++	vmov	q11,q0
++	vmov	q0,q10
++	vmov	q10,q11
++	vmov	q11,q1
++	vmov	q1,q9
++	vmov	q9,q11
++	vmov	q11,q2
++	vmov	q2,q8
++	vmov	q8,q11
++	vmov	q11,q3
++	vmov	q3,q7
++	vmov	q7,q11
++	vmov	q11,q4
++	vmov	q4,q6
++	vmov	q6,q11
++
++	mov	r11, #4
++	@ 	index in r11, leaves result in r0, overwrites r1
++	bl	fetch_key_idx
++	@ldr	r0,[r11,#16]!		@ prefetch tp1
++	mov	r7,#0x80
++	mov	r8,#0x1b
++	orr	r7,r7,#0x8000
++	orr	r8,r8,#0x1b00
++	orr	r7,r7,r7,lsl#16
++	orr	r8,r8,r8,lsl#16
++	sub	r12,r12,#1
++	mvn	r9,r7
++	mov	r12,r12,lsl#2	@ (rounds-1)*4
++
++.Lmix:	and	r4,r0,r7
++	and	r1,r0,r9
++	sub	r4,r4,r4,lsr#7
++	and	r4,r4,r8
++	eor	r1,r4,r1,lsl#1	@ tp2
++
++	and	r4,r1,r7
++	and	r2,r1,r9
++	sub	r4,r4,r4,lsr#7
++	and	r4,r4,r8
++	eor	r2,r4,r2,lsl#1	@ tp4
++
++	and	r4,r2,r7
++	and	r3,r2,r9
++	sub	r4,r4,r4,lsr#7
++	and	r4,r4,r8
++	eor	r3,r4,r3,lsl#1	@ tp8
++
++	eor	r4,r1,r2
++	eor	r5,r0,r3		@ tp9
++	eor	r4,r4,r3		@ tpe
++	eor	r4,r4,r1,ror#24
++	eor	r4,r4,r5,ror#24	@ ^= ROTATE(tpb=tp9^tp2,8)
++	eor	r4,r4,r2,ror#16
++	eor	r4,r4,r5,ror#16	@ ^= ROTATE(tpd=tp9^tp4,16)
++	eor	r4,r4,r5,ror#8	@ ^= ROTATE(tp9,24)
++
++	@str	r4,[r11],#4
++	mov	r0, r4
++	bl	store_key_idx
++	add	r11, r11, #1
++	
++	bl	fetch_key_idx
++	@ldr	r0,[r11,#4]		@ prefetch tp1
++	subs	r12,r12,#1
++	bne	.Lmix
++
++	mov	r0,#0
++	ldmia	sp!,{r4-r12,pc}
++.size	neon_AES_set_decrypt_key,.-neon_AES_set_decrypt_key
++
++@ void neon_AES_decrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global neon_AES_decrypt
++.type   neon_AES_decrypt,%function
++.align	5
++neon_AES_decrypt:
++	sub	r3,pc,#8		@ AES_decrypt
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr	r10,=AES_Td
++	ldr	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_neon_AES_decrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++
++	ldmia	sp!,{r4-r12,pc}
++.size	neon_AES_decrypt,.-neon_AES_decrypt
++
++.type   _neon_AES_decrypt,%function
++.align	2
++_neon_AES_decrypt:
++	str	lr,[sp,#-4]!		@ push lr
++	vmov.i64 d22,#0
++	bl	load_next_key
++	mov	r8, r7
++	mov     r7, r6
++	mov     r6, r5
++	mov     r5, r4
++	mov     r4, r8
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0,lsr#16
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0
++	mov	r0,r0,lsr#24
++.Ldec_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Td1[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Td2[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldr	r6,[r10,r9,lsl#2]	@ Td3[s0>>0]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Td0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Td3[s1>>0]
++	ldr	r8,[r10,r8,lsl#2]	@ Td1[s1>>16]
++	ldr	r9,[r10,r9,lsl#2]	@ Td2[s1>>8]
++	eor	r0,r0,r7,ror#24
++	ldr	r1,[r10,r1,lsl#2]	@ Td0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,ror#8
++	and	r8,lr,r2		@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r2,lsr#16
++	ldr	r7,[r10,r7,lsl#2]	@ Td2[s2>>8]
++	eor	r1,r1,r4,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td3[s2>>0]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td1[s2>>16]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Td0[s2>>24]
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r1,r1,r8,ror#24
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r3		@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Td1[s3>>16]
++	eor	r2,r2,r5,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td3[s3>>0]
++	eor	r0,r0,r7,ror#8
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Td0[s3>>24]
++	eor	r2,r2,r9,ror#24
++	eor	r3,r3,r6,ror#8	
++	@ load key
++	mov	r11, lr
++	bl	load_next_key
++	mov	lr, r11
++	eor	r0,r0,r7
++	and	r7,lr,r0,lsr#16
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Ldec_loop
++
++	add	r10,r10,#1024
++
++	ldr	r5,[r10,#0]		@ prefetch Td4
++	ldr	r6,[r10,#32]
++	ldr	r4,[r10,#64]
++	ldr	r5,[r10,#96]
++	ldr	r6,[r10,#128]
++	ldr	r4,[r10,#160]
++	ldr	r5,[r10,#192]
++	ldr	r6,[r10,#224]
++
++	ldrb	r0,[r10,r0]		@ Td4[s0>>24]
++	ldrb	r4,[r10,r7]		@ Td4[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldrb	r5,[r10,r8]		@ Td4[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldrb	r6,[r10,r9]		@ Td4[s0>>0]
++	and	r9,lr,r1,lsr#8
++
++	ldrb	r7,[r10,r7]		@ Td4[s1>>0]
++	ldrb	r1,[r10,r1,lsr#24]	@ Td4[s1>>24]
++	ldrb	r8,[r10,r8]		@ Td4[s1>>16]
++	eor	r0,r7,r0,lsl#24
++	ldrb	r9,[r10,r9]		@ Td4[s1>>8]
++	eor	r1,r4,r1,lsl#8
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,lsl#8
++	and	r8,lr,r2		@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s2>>8]
++	eor	r6,r6,r9,lsl#8
++	ldrb	r8,[r10,r8]		@ Td4[s2>>0]
++	and	r9,lr,r2,lsr#16
++
++	ldrb	r2,[r10,r2,lsr#24]	@ Td4[s2>>24]
++	eor	r0,r0,r7,lsl#8
++	ldrb	r9,[r10,r9]		@ Td4[s2>>16]
++	eor	r1,r8,r1,lsl#16
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r2,r5,r2,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s3>>16]
++	eor	r6,r6,r9,lsl#16
++	ldrb	r8,[r10,r8]		@ Td4[s3>>8]
++	and	r9,lr,r3		@ i2
++
++	ldrb	r9,[r10,r9]		@ Td4[s3>>0]
++	ldrb	r3,[r10,r3,lsr#24]	@ Td4[s3>>24]
++	eor	r0,r0,r7,lsl#16
++	eor	r1,r1,r8,lsl#8
++	eor	r2,r9,r2,lsl#8
++	eor	r3,r6,r3,lsl#24
++	bl	load_next_key
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#1024
++	ldr	pc,[sp],#4		@ pop and return
++.size	_neon_AES_decrypt,.-_neon_AES_decrypt
++.asciz	"AES for ARMv4, CRYPTOGAMS by <appro@openssl.org>"
++.align	2
+diff --git a/arch/arm/aes-openssl/aes-onsoc_glue.c b/arch/arm/aes-openssl/aes-onsoc_glue.c
+new file mode 100644
+index 0000000..f1eb005
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-onsoc_glue.c
+@@ -0,0 +1,305 @@
++/*
++ * Cryptographic API.
++ *
++ * Support for On-SoC AES.
++ *
++ * Copyright (c) 2011 Microsoft Corporation
++ * Author: Patrick Colp <t-patrco@microsoft.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as published
++ * by the Free Software Foundation.
++ */
++
++#include <linux/module.h>
++#include <linux/err.h>
++#include <linux/crypto.h>
++#include <linux/platform_device.h>
++#include <crypto/algapi.h>
++#include <crypto/aes.h>
++#include <crypto/cryptd.h>
++#include <asm/cacheflush.h>
++#include <asm/hardware/cache-l2x0.h>
++#include <asm/io.h>
++#include <mach/iomap.h>
++#include <linux/cachelock.h>
++
++void copy_into_locked(void);
++
++#define AES_STATE_SIZE (2*1024) + (2*256) + 40
++
++// Flag to allow use of cache locked memory (done by a separate driver)
++#define AESONSOC_CACHE_LOCK 1
++
++// Flag to indicate whether we're using standard openssl aes.
++// For now, we just set this at compile time.
++// XXX: In future, this should be a module option.
++static int useneon = 1;
++module_param (useneon, int, 0644);
++
++#if AESONSOC_CACHE_LOCK
++// These symbols are exported by the cache locking driver.
++static unsigned long locked_mem_addr = 0;
++static int locked_mem_size = 0;
++static void *locked_mem_area;
++#endif
++
++
++#define AES_BLOCK_MASK	(~(AES_BLOCK_SIZE-1))
++
++#include "aes.h"
++
++struct async_aes_ctx {
++	struct cryptd_ablkcipher *cryptd_tfm;
++};
++
++static inline struct crypto_aes_ctx *aes_ctx(void *raw_ctx)
++{
++	unsigned long addr = (unsigned long)raw_ctx;
++	unsigned long align = 0;
++
++	if (align <= crypto_tfm_ctx_alignment())
++		align = 1;
++	return (struct crypto_aes_ctx *)ALIGN(addr, align);
++}
++
++static u8 *saved_key;
++static unsigned int saved_key_len;
++typedef enum {NONE, ENCRYPT, DECRYPT} OP_TYPE;
++static OP_TYPE last_op = NONE;
++static unsigned int cbc_encrypt_ops = 0;
++static unsigned int cbc_decrypt_ops = 0;
++static unsigned long long cbc_encrypt_bytes = 0;
++static unsigned long long cbc_decrypt_bytes = 0;
++
++static int aes_set_key_common(struct crypto_tfm *tfm, void *raw_ctx,
++                              const u8 *in_key, unsigned int key_len,
++                              OP_TYPE operation)
++{
++	struct crypto_aes_ctx *ctx = aes_ctx(raw_ctx);
++	u32 *flags = &tfm->crt_flags;
++	int err = 0;
++
++	if (key_len != AES_KEYSIZE_128 && key_len != AES_KEYSIZE_192 &&
++	    key_len != AES_KEYSIZE_256) {
++		*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
++		return -EINVAL;
++	}
++
++	if (operation == ENCRYPT) {
++		err = AES_set_encrypt_key(in_key, ctx->key_enc);
++	} else if (operation == DECRYPT) {
++		err = AES_set_decrypt_key(in_key, ctx->key_dec);
++	} else if (operation == NONE)  {
++		AES_set_key((struct aes_ctx *)ctx, in_key, key_len);
++	} else {
++		BUG_ON(0);
++	}
++
++	return err;
++}
++
++static int aes_set_key(struct crypto_tfm *tfm, const u8 *in_key,
++                       unsigned int key_len)
++{
++	saved_key = (u8 *)in_key;
++	saved_key_len = key_len;
++
++	/* Call set key if we are using standard openssl aes. */
++	if (useneon == 0) {
++		return aes_set_key_common(tfm, crypto_tfm_ctx(tfm), in_key,
++		                          key_len, NONE);
++	}
++	return 0;
++}
++
++static int cbc_encrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
++                       struct scatterlist *src, unsigned int nbytes)
++{
++	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
++	struct crypto_tfm *tfm = &(desc->tfm->base);
++	struct blkcipher_walk walk;
++	int err;
++
++	cbc_encrypt_ops++;
++	cbc_encrypt_bytes += nbytes;
++
++	blkcipher_walk_init(&walk, dst, src, nbytes);
++	err = blkcipher_walk_virt(desc, &walk);
++	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
++
++	/* If we're using the neon version of openssl aes, then we may need to
++	 * call aes_set_key_common here... */
++	if (useneon == 1 && last_op != ENCRYPT) {
++		aes_set_key_common(tfm, crypto_tfm_ctx(tfm), saved_key,
++		                   saved_key_len, ENCRYPT);
++	}
++
++	while ((nbytes = walk.nbytes)) {
++		/* We do VFP access inside that function, and hence should
++		 * disable preemption. Note that it should be ok to call this
++		 * code on multiple cores, since each core has its own VFP. */
++		preempt_disable();
++		if (useneon == 1) {
++			AES_neon_cbc_encrypt((struct aes_ctx *)ctx,
++			                     walk.dst.virt.addr,
++			                     walk.src.virt.addr,
++			                     nbytes & AES_BLOCK_MASK, walk.iv);
++		} else {
++			AES_cbc_enc((struct aes_ctx *)ctx,
++			            walk.dst.virt.addr, walk.src.virt.addr,
++			            nbytes & AES_BLOCK_MASK, walk.iv);
++		}
++		preempt_enable();
++
++		nbytes &= AES_BLOCK_SIZE - 1;
++		err = blkcipher_walk_done(desc, &walk, nbytes);
++	}
++
++	return err;
++}
++
++static int cbc_decrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
++                       struct scatterlist *src, unsigned int nbytes)
++{
++	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
++	struct crypto_tfm *tfm = &(desc->tfm->base);
++	struct blkcipher_walk walk;
++	int err;
++
++	cbc_decrypt_ops++;
++	cbc_decrypt_bytes += nbytes;
++
++	blkcipher_walk_init(&walk, dst, src, nbytes);
++	err = blkcipher_walk_virt(desc, &walk);
++	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
++
++	/* If we're using the neon version of openssl aes, then we may need to
++	 * call aes_set_key_common here... */
++	if (useneon == 1 && last_op != DECRYPT) {
++		aes_set_key_common(tfm, crypto_tfm_ctx(tfm), saved_key,
++		                   saved_key_len, ENCRYPT);
++	}
++
++	while ((nbytes = walk.nbytes)) {
++		preempt_disable();
++		if (useneon == 1) {
++			AES_neon_cbc_decrypt((struct aes_ctx *)ctx,
++			                     walk.dst.virt.addr,
++			                     walk.src.virt.addr,
++			                     nbytes & AES_BLOCK_MASK, walk.iv);
++		} else {
++			AES_cbc_dec((struct aes_ctx *)ctx, walk.dst.virt.addr,
++			            walk.src.virt.addr, nbytes & AES_BLOCK_MASK,
++			            walk.iv);
++		}
++		preempt_enable();
++
++		nbytes &= AES_BLOCK_SIZE - 1;
++		err = blkcipher_walk_done(desc, &walk, nbytes);
++	}
++
++	return err;
++}
++
++static struct crypto_alg blk_cbc_alg = {
++	.cra_name               = "cbc(aes)",
++	.cra_driver_name        = "cbc-aes-aesonsoc",
++	.cra_priority           = 300,
++	.cra_flags              = CRYPTO_ALG_TYPE_BLKCIPHER,
++	.cra_blocksize          = AES_BLOCK_SIZE,
++	.cra_ctxsize            = sizeof(struct crypto_aes_ctx),
++	.cra_alignmask          = 3,    // We need word aligned.
++	.cra_type               = &crypto_blkcipher_type,
++	.cra_module             = THIS_MODULE,
++	.cra_list               = LIST_HEAD_INIT(blk_cbc_alg.cra_list),
++	.cra_u = {
++		.blkcipher = {
++			.min_keysize    = AES_MIN_KEY_SIZE,
++			.max_keysize    = AES_MIN_KEY_SIZE,
++			.ivsize         = AES_MIN_KEY_SIZE,
++			.setkey         = aes_set_key,
++			.encrypt        = cbc_encrypt,
++			.decrypt        = cbc_decrypt,
++		},
++	},
++};
++
++void copy_into_locked()
++{
++#if AESONSOC_CACHE_LOCK
++	if (locked_mem_size < AES_STATE_SIZE) {
++		pr_debug("aes-on-soc failure: copy_into_locked, len (%d) < " \
++		         "required state size (%d)\n", locked_mem_size,
++		         AES_STATE_SIZE);
++		return;
++	}
++
++	if (AES_init_tables(locked_mem_area, locked_mem_size) == 0) {
++		pr_debug("aes-on-soc failure: AES_init_tables failed\n");
++	}
++#else
++	int alloc_order = get_order(AES_STATE_SIZE);
++	unsigned long aes_mem_area = __get_free_pages(GFP_KERNEL, alloc_order);
++	if (aes_mem_area == 0) {
++		pr_debug("aes-on-soc failure: copy_into_locked, " \
++		         "__get_free_pages(%d) failed\n", alloc_order);
++	}
++	if (AES_init_tables(aes_mem_area, AES_STATE_SIZE) == 0) {
++		pr_debug("aes-on-soc failure: AES_init_tables failed\n");
++	}
++#endif
++
++	return;
++}
++
++static int __init aesonsoc_init(void)
++{
++	int err;
++
++	pr_debug("aes-openssl loading, use-neon = %d\n", useneon);
++#if AESONSOC_CACHE_LOCK
++	locked_mem_addr = cachelock_mem_start;
++	locked_mem_size = cachelock_mem_end - cachelock_mem_start;
++
++	locked_mem_area = (void *)locked_mem_addr;
++	pr_debug("aes-openssl loading, cache-locking = 1\n");
++#else
++	pr_debug("aes-openssl loading, cache-locking = 0\n");
++#endif
++
++	if ((err = crypto_register_alg(&blk_cbc_alg)))
++	{
++		pr_err("aes-on-soc: failed to register cbc alg\n");
++		goto blk_cbc_err;
++	}
++
++	/* Now copy all data that we want into cache locked location. */
++	copy_into_locked();
++
++	return 0;
++
++blk_cbc_err:
++	return err;
++}
++
++static void __exit aesonsoc_exit(void)
++{
++	crypto_unregister_alg(&blk_cbc_alg);
++
++	pr_debug("aes-openssl:\n");
++	pr_debug("aes-openssl cbc_encrypt_ops=%u, cbc_decrypt_ops=%u\n",
++	         cbc_encrypt_ops, cbc_decrypt_ops);
++	pr_debug("aes-openssl cbc_encrypt_bytes=%llu, cbc_decrypt_bytes=%llu\n",
++	         cbc_encrypt_bytes, cbc_decrypt_bytes);
++}
++
++module_init(aesonsoc_init);
++module_exit(aesonsoc_exit);
++
++
++MODULE_DESCRIPTION("On-SoC OpenSSL AES support. vers=1.2 (3/25/2013)");
++MODULE_LICENSE("GPL v2");
++MODULE_AUTHOR("Patrick Colp");
++MODULE_ALIAS("aes");
++MODULE_ALIAS("aes-asm");
+diff --git a/arch/arm/aes-openssl/aes.h b/arch/arm/aes-openssl/aes.h
+new file mode 100644
+index 0000000..9b8d208
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes.h
+@@ -0,0 +1,60 @@
++
++#define GETU32(pt) (((unsigned int)(pt)[0] << 24) ^ ((unsigned int)(pt)[1] << 16) ^ ((unsigned int)(pt)[2] <<  8) ^ ((unsigned int)(pt)[3]))
++
++// Because array size can't be a const in C, the following two are macros.
++// Both sizes are in bytes.
++#define AES_MAXNR 14
++#define AES_BLOCK_SIZE 16
++
++/* This should be a hidden type, but EVP requires that the size be known */
++struct aes_key_st {
++  unsigned int rd_key[4 *(AES_MAXNR + 1)];
++  int rounds;
++};
++typedef struct aes_key_st AES_KEY;
++
++#ifndef AES_MAX_KEYLENGTH
++#define AES_MAX_KEYLENGTH 240
++#endif
++
++#ifndef AES_MAX_KEYLENGTH_U32
++#define AES_MAX_KEYLENGTH_U32 (AES_MAX_KEYLENGTH / sizeof(unsigned int))
++#endif
++
++struct aes_ctx {
++  unsigned int key_enc[4 * (AES_MAXNR + 1)];
++  unsigned int key_dec[4 * (AES_MAXNR + 1)];
++  unsigned int key_length;
++};
++
++/* asm version of encrypt/decrypt, in aes-arm.s */
++void AES_encrypt(const unsigned char *in, unsigned char *out,
++		 const unsigned int *key);
++void AES_decrypt(const unsigned char *in, unsigned char *out,
++		 const unsigned int *key);
++
++/* neon versions of encrypt/decrypt & set key, in aes-neon.s */
++void neon_AES_encrypt(const unsigned char *in, unsigned char *out,
++		      const unsigned int *key);
++void neon_AES_decrypt(const unsigned char *in, unsigned char *out,
++		      const unsigned int *key);
++int neon_AES_set_encrypt_key(const unsigned char *userKey, int bits, struct aes_ctx *ctx);
++int neon_AES_set_decrypt_key(const unsigned char *userKey, int bits, struct aes_ctx *ctx);
++
++/* variants of set key, in aes_glue.c */
++void AES_set_key(struct aes_ctx *ctx, const unsigned char *userKey, unsigned int key_len);
++int AES_set_encrypt_key(const unsigned char *userKey, unsigned int *key);
++int AES_set_decrypt_key(const unsigned char *userKey, unsigned int *key);
++
++/* table init, in aes_glue.c */
++int AES_init_tables(unsigned char *buffer, size_t len);
++
++/* encrypt and decrypt routines, in aes_glue.c */
++void AES_neon_cbc_encrypt(struct aes_ctx *ctx, unsigned char *out,
++                          const unsigned char *in, size_t len, unsigned char *ivec);
++void AES_neon_cbc_decrypt(struct aes_ctx *ctx, unsigned char *out,
++                          const unsigned char *in, size_t len, unsigned char *ivec);
++void AES_cbc_enc(struct aes_ctx *ctx, unsigned char *out, const unsigned char *in,
++                 size_t len, unsigned char *ivec);
++void AES_cbc_dec(struct aes_ctx *ctx, unsigned char *out, const unsigned char *in,
++                 size_t len, unsigned char *ivec);
+diff --git a/arch/arm/aes-openssl/aw-notes.txt b/arch/arm/aes-openssl/aw-notes.txt
+new file mode 100644
+index 0000000..58a2dcc
+--- /dev/null
++++ b/arch/arm/aes-openssl/aw-notes.txt
+@@ -0,0 +1,54 @@
++
++aes-glue.c, aes.h, aes-arm.s, aes-neon.s: 
++   these versions are identical to the checked-in versions from benchmarks/opensslonsoc-dyn.
++
++===============================================
++Changes to aes-glue.c:
++===============================================
++- add #define KERNEL to the top of the file
++
++===============================================
++Changes to aes-onsoc_glue.c:
++===============================================
++There are a bunch of changes between this version and patrick & himanshu's original version:
++
++- change #define AESONSOC_TEST 1 to #define AESONSOC_TEST 0
++
++- eliminated ifdef for AESONSOC_CBC: cbc is always enabled
++
++- removed: ecb_encrypt, ecb_decrypt, blk_ecb_alg
++  removed references to aesonsoc_ecb_{enc,dec} routines
++
++- removed: aes_encrypt, aes_decrypt, aesonsoc_alg
++  removed references to aesonsoc_{enc,dec} routines
++
++- changed #if 0 to #if AESONSOC_TEST in some places
++
++- Eliminated initialization and cleanup code to 
++  register and unregister aesonsoc_alg and blk_ecb_alg.
++
++- Eliminated existing code for AESONSOC_CACHE_LOCK, but left in the #define
++  so that we can add back in the correct code for handling this...
++
++- Added the useneon flag to indicate whether or not the version of openssl aes we are
++  currently using is the neon version.  modified aes_set_key, cbc_encrypt, cbc_decrypt 
++  to use this flag.  made useneon a module parameter.
++
++- Modified the cbc_encrypt and cbc_decrypt routines to check the
++  last_op, and if it isn't a match, then call aes_set_key_common.
++
++- Modified the aes_set_key routine so that if we are not using neon, then we call
++  aes_set_key_common with operation = NONE.
++
++- changed all calls to aes_asm_set_key_{enc,dec} to AES_set_{encrypt,decrypt}_key
++  removed all the asmlinkage forward references, added #include for aes.h
++
++- cleanup the forward references to asm routines that are no longer needed
++
++- modified copy_into_locked to call AES_init_tables using the locked_mem_area symbol
++
++- added counters for encryption ops & bytes, print counters at module unload time
++
++XXX todo:
++  potentially incorrect args to AES_set_{encrypt,decrypt}_key
++
+diff --git a/arch/arm/cachelock/Makefile b/arch/arm/cachelock/Makefile
+new file mode 100644
+index 0000000..f60dbdf
+--- /dev/null
++++ b/arch/arm/cachelock/Makefile
+@@ -0,0 +1 @@
++obj-m := cachelock.o
+diff --git a/arch/arm/cachelock/cachelock.c b/arch/arm/cachelock/cachelock.c
+new file mode 100644
+index 0000000..07a3a23
+--- /dev/null
++++ b/arch/arm/cachelock/cachelock.c
+@@ -0,0 +1,525 @@
++#include <linux/module.h>
++#include <linux/err.h>
++#include <linux/crypto.h>
++#include <linux/platform_device.h>
++#include <crypto/algapi.h>
++#include <crypto/aes.h>
++#include <crypto/cryptd.h>
++#include <asm/cacheflush.h>
++#include <asm/hardware/cache-l2x0.h>
++#include <asm/io.h>
++#include <mach/iomap.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/cachelock.h>
++#include <linux/cachelock_pool.h>
++
++#define CACHELOCK_BUG_1
++#define CACHELOCK_NO_INST 1
++#define CACHELOCK_TIMING 0
++
++static int nways = 1; // By default lock 1 way.
++module_param (nways, int, 0644);
++
++static int touch = 1; // By default touch the data that need to be locked.
++module_param (touch, int, 0644);
++
++static int alloc_order = 1; // By default allocate 1 page.
++static int memsize = 4096;
++module_param (memsize, int, 0644);
++
++unsigned long locked_mem_area = 0;
++EXPORT_SYMBOL(locked_mem_area);
++
++struct page *locked_mem_page;
++EXPORT_SYMBOL(locked_mem_page);
++
++static int readonly = 0;
++
++int cdev_mmap(struct file *filp, struct vm_area_struct *vma);
++int cdev_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
++ssize_t cdev_write(struct file *filp, const char __user *u, size_t size, loff_t *offset);
++ssize_t cdev_read(struct file *filep, char __user *u, size_t size, loff_t *offset);
++
++struct file_operations cdev_fops = {
++	.owner = THIS_MODULE,
++	.mmap = cdev_mmap,
++	.write = cdev_write,
++	.read = cdev_read,
++};
++
++struct vm_operations_struct cdev_vm_ops = {
++	.fault = cdev_vma_fault,
++};
++
++static dev_t cdev_major;
++static struct class *cdev_class;
++
++static void access_and_lock(void *start, int len, u32 way_size, int cpu)
++{
++	int i;
++	void *data_aligned = start;
++	int len_aligned = len;
++	unsigned int temp;
++	const unsigned char default_pattern_plus1[8] = { 'H', 't', 'e', 'F',
++	                                                 'B', '7', 'z', '{' };
++	int curr_way;
++	int curr_len;
++	int curr_len_aligned;
++	u32 mask;
++	void __iomem *p;
++	unsigned int test = 0;
++
++	/* Location of PL310. */
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++
++	/* If data isn't cache line aligned, adjust len to ensure all bytes get
++	 * filled in. */
++	if (((int)data_aligned) & 0x1F) {
++		len_aligned += (((int)data_aligned) & 0x1F);
++		data_aligned = (void *)(((int)data_aligned) & ~0x1F);
++	}
++
++	/* Only touch the cache lines and fill in the random pattern if the
++	 * module parameter indicates that this should be done... */
++	if (touch == 1) {
++		curr_len = 0;
++		curr_len_aligned = 0;
++
++		for (curr_way = 0; curr_way < nways; curr_way++) {
++			/* Only open one way at a time. */
++			mask = (1 << curr_way);
++			mask = ~mask & 0xFF;
++
++			writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++			             cpu * L2X0_LOCKDOWN_STRIDE);
++
++			if (readonly) {
++				/* Use a stride less than actual cache line. */
++				for (i = 0; (i < way_size) && (curr_len < len);
++				     i++, curr_len++) {
++					temp = *(unsigned int *)(start + curr_len);
++					test += temp;
++				}
++			} else {
++				/* Fill in the random pattern. */
++				for (i = 0; (i < way_size) && (curr_len < len);
++				     i++, curr_len++) {
++					*(unsigned char *)(start + curr_len) =
++					    default_pattern_plus1[curr_len%8]-1;
++				}
++			}
++		}
++	}
++}
++
++static int __init cachelock_init(void)
++{
++	int err;
++	int i;
++	int cpu;
++	void __iomem *p;
++	u32 temp, mask;
++	u32 aux_ctrl;
++	u32 way_size;
++
++	/* Print out the module params at initialization time. */
++	pr_debug("cachelock_init: nways=%d, memsize=%d, touch=%d\n", nways,
++	         memsize, touch);
++
++	/* Allocate a memory buffer which will be locked into cache later.
++	 * Note: We assume that the buffer will be smaller than a way size and
++	 *       contiguous, so as to not cause cache line conflicts. */
++	alloc_order = get_order(memsize);
++	pr_debug("cachelock_init: Allocating 2^%d pages\n", alloc_order);
++
++	locked_mem_page = alloc_pages(GFP_KERNEL, alloc_order);
++	pr_debug("cachelock_init: Locked mem page @ 0x%p (PAGE); 0x%p (VA); " \
++	         "0x%p (PA)\n", locked_mem_page,
++	         __va(page_to_phys(locked_mem_page)),
++	         page_to_phys(locked_mem_page));
++
++	locked_mem_area = (unsigned long)__va(page_to_phys(locked_mem_page));
++	if (locked_mem_area == 0) {
++		err = -ENOMEM;
++		goto mem_alloc_err;
++	}
++
++	pr_debug("cachelock_init: Locked mem @ %p (VA) -- %p (PA)\n",
++	         (void*)locked_mem_area, (void*)__pa(locked_mem_area));
++
++	/* We also expose a char dev interface to map this memory area in
++	 * userspace. */
++	if ((cdev_major =
++	         register_chrdev(0, "cache-locked-mem", &cdev_fops)) < 0) {
++		pr_err("cachelock_init: error allocating char dev\n");
++		err = cdev_major;
++		goto mem_alloc_err;
++	}
++
++	if ((cdev_class = class_create(THIS_MODULE, "cache-locked-mem")) < 0) {
++		pr_err("cachelock_init: error creating dev class\n");
++		err = cdev_major;
++		goto class_create_err;
++	}
++
++	device_create(cdev_class, NULL, MKDEV(cdev_major, 1), NULL,
++	              "cache-locked-mem");
++
++	/* We use lockdown by master - CPU0 can use all ways, but locks data to
++	 * way 0. Other CPUs use ways other than 0.
++	 * Note: We must ensure that this code runs on CPU0 only, also we must
++	 *       ensure that all other CPUs are parked when caches are
++	 *       disabled. */
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++	pr_debug("cachelock_init: CPU [%d]\n", cpu);
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	/* This doesn't seem necessary, but spec wants it done, so... */
++	dsb();
++
++	// Set exported values
++	cachelock_force_flush = 0;
++	cachelock_mem_start = locked_mem_area;
++	cachelock_mem_end = locked_mem_area + memsize;
++	cachelock_mem_pa_start = __pa(locked_mem_area);
++	cachelock_mem_pa_end = __pa(locked_mem_area) + memsize;
++	cachelock_loaded = 1;
++
++	/* Location of the PL310. */
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++
++	aux_ctrl = readl(p + L2X0_AUX_CTRL);
++	way_size = ((aux_ctrl & L2X0_AUX_CTRL_WAY_SIZE_MASK) >> L2X0_AUX_CTRL_WAY_SIZE_SHIFT);
++
++	/* Get the way size. */
++	/* Check for corner cases. */
++	if (way_size == 0) {
++		way_size = 1;
++	} else if (way_size > 6) {
++		way_size = 6;
++	}
++	way_size = ((8 << way_size) << 10);
++	pr_debug("cachelock_init: way size = %d\n", way_size);
++
++	aux_ctrl = readl(p + L2X0_CACHE_TYPE);
++	pr_debug("cachelock_init: lockdown by master/line = 0x%x\n",
++	         ((aux_ctrl >> 25) & 3));
++
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++				i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_init: Start: Lockdown_D[%d] = %x\n", i,
++		         temp);
++	}
++
++	/* Lock data to specified ways for both data and instructions. */
++
++	/* First, disallow access for all lines other than the ones required for
++	 * this CPU. */
++	mask = (1 << nways) - 1;
++	mask = ~mask & 0xFF;
++
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++
++#if CACHELOCK_NO_INST
++	/* Don't let instructions pollute our cache. */
++	mask = (1 << nways) - 1;
++	writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++#endif
++
++	/* For CPUs other than the one running this code, this mask will not
++	 * change, ensuring that no line from way 0 is ever allocated to these
++	 * CPUs.
++	 * Note: We only need to worry about first 4 lock regs since our system
++	 *       is quad core, however for now we set all lock regs just to be
++	 *       sure. */
++	mask = (1 << nways) - 1;
++	for (i = 0; i < 8; i++) {
++		if (i == cpu) continue;
++		writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	dsb();
++
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_init: Before locking data: " \
++		         "Lockdown_D[%d] = %x\n", i, temp);
++	}
++
++	/* Flush again to enforce any future allocations follow our locking
++	 * scheme. */
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	/* Now access all data that we want cache locked. */
++	access_and_lock((void *)locked_mem_area, memsize, way_size, cpu);
++
++	/* This dsb ensures that any outstanding memory access is complete. */
++	dsb();
++
++	/* Now disable access to these ways from the current CPU, effectively
++	 * locking all data in it. */
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE + cpu * L2X0_LOCKDOWN_STRIDE);
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_init: After locking data: " \
++		         "Lockdown_D[%d] = %x\n", i, temp);
++	}
++
++	/* Initialise pool to store decrypted pages. */
++	cachelock_pool_init();
++
++	/* Cachelock is loaded and initialised. */
++	cachelock_loaded_done = 1;
++
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return 0;
++
++ class_create_err:
++	unregister_chrdev(cdev_major, "cache-locked-mem");
++ mem_alloc_err:
++	return err;
++}
++
++static void __exit cachelock_exit(void)
++{
++	void __iomem *p;
++	int i;
++	u32 temp;
++
++	/* Location of PL310. */
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_exit: Lockdown_D[%d] = %x\n", i, temp);
++	}
++
++	// Unlock all the ways
++	for (i = 0; i < 8; i++) {
++		writel(0x0, p + L2X0_LOCKDOWN_WAY_D_BASE +
++		            i * L2X0_LOCKDOWN_STRIDE);
++		writel(0x0, p + L2X0_LOCKDOWN_WAY_I_BASE +
++		            i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	dsb();
++
++	/* Clear the exported variables. */
++	cachelock_force_flush = 0;
++	cachelock_loaded_done = 0;
++	cachelock_loaded = 0;
++	cachelock_mem_start = 0;
++	cachelock_mem_end = 0;
++	cachelock_mem_pa_start = 0;
++	cachelock_mem_pa_end = 0;
++
++	/* Flush again to force anything in the cache out. */
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	/* Free the locked area, if needed. */
++	if (locked_mem_area != 0) {
++		free_pages(locked_mem_area, alloc_order);
++	}
++
++	/* Unregister and destroy device. */
++	unregister_chrdev(cdev_major, "cache-locked-mem");
++	device_destroy(cdev_class, MKDEV(cdev_major, 1));
++	class_destroy(cdev_class);
++}
++
++int cdev_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
++{
++	unsigned long offset;
++	unsigned long pfn;
++
++	offset = vmf->pgoff << PAGE_SHIFT;
++	if (offset >= memsize) {
++		return VM_FAULT_SIGBUS;
++	}
++
++	pfn = __pa(locked_mem_area + offset) >> PAGE_SHIFT;
++
++	vm_insert_pfn(vma, (unsigned long)(vmf->virtual_address), pfn);
++
++	return VM_FAULT_NOPAGE;
++}
++
++int cdev_mmap(struct file *filp, struct vm_area_struct *vma)
++{
++	vma->vm_ops = &cdev_vm_ops;
++	vma->vm_flags |= (VM_IO | VM_RESERVED | VM_PFNMAP | VM_DONTEXPAND);
++	return 0;
++}
++
++ssize_t cdev_write(struct file *filp, const char __user *u, size_t size, loff_t *offset)
++{
++	void __iomem *p;
++	int cpu;
++	u32 mask;
++	u32 aux_ctrl;
++	u32 way_size;
++	int i;
++
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++
++	aux_ctrl = readl(p + L2X0_AUX_CTRL);
++
++	/* Get the way size. */
++	way_size = ((aux_ctrl & L2X0_AUX_CTRL_WAY_SIZE_MASK) >>
++	            L2X0_AUX_CTRL_WAY_SIZE_SHIFT);
++
++	/* Check for corner cases. */
++	if (way_size == 0) {
++		way_size = 1;
++	} else if (way_size > 6) {
++		way_size = 6;
++	}
++	way_size = ((8 << way_size) << 10);
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	dsb();
++
++	/* Lock data to specified ways for both data and instructions. */
++	/* First, disallow access for all lines other than the ones required for
++	 * this CPU. */
++	mask = (1 << nways) - 1;
++	mask = ~mask & 0xFF;
++
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++
++#if CACHELOCK_NO_INST
++	/* Don't let instructions pollute our cache. */
++	mask = (1 << nways) - 1;
++	writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++#endif
++
++	/* For CPUs other than the one running this code, this mask will not
++	 * change, ensuring that no line from way 0 is ever allocated to these
++	 * CPUs.
++	 * Note: We only need to worry about first 4 lock regs since our system
++	 *       is quad core, however for now we set all lock regs just to be
++	 *       sure. */
++	mask = (1 << nways) - 1;
++	for (i = 0; i < 8; i++) {
++		if (i == cpu) continue;
++		writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	dsb();
++
++	cachelock_force_flush = 1;
++
++	/* Flush again to enforce any future allocations follow our locking
++	 * scheme. */
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	cachelock_force_flush = 0;
++
++	/* Now access all data that we want cache locked. */
++	readonly = 1;
++	access_and_lock((void *)locked_mem_area, memsize, way_size, cpu);
++	readonly = 0;
++
++	/* This dsb ensures that any outstanding memory access is complete. */
++	dsb();
++
++	/* Now disable access to these ways from the current CPU, effectively
++	 * locking all data in it. */
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++			cpu * L2X0_LOCKDOWN_STRIDE);
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return size;
++}
++
++ssize_t cdev_read(struct file *filep, char __user *u, size_t size, loff_t *offset)
++{
++	int cpu;
++	void __iomem *p;
++	uint32_t mask;
++	unsigned i;
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	dsb();
++
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++	for (i = 0; i < 8; i++) {
++		mask = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return 0;
++}
++
++module_init(cachelock_init);
++module_exit(cachelock_exit);
++
++MODULE_DESCRIPTION("PL310 cache locking support.");
++MODULE_LICENSE("GPL v2");
+diff --git a/arch/arm/include/asm/pgtable.h b/arch/arm/include/asm/pgtable.h
+index e6d609c..d5bb478 100644
+--- a/arch/arm/include/asm/pgtable.h
++++ b/arch/arm/include/asm/pgtable.h
+@@ -173,6 +173,7 @@ extern void __pgd_error(const char *file, int line, pgd_t);
+ #define L_PTE_USER		(_AT(pteval_t, 1) << 8)
+ #define L_PTE_XN		(_AT(pteval_t, 1) << 9)
+ #define L_PTE_SHARED		(_AT(pteval_t, 1) << 10)	/* shared(v6), coherent(xsc3) */
++#define L_PTE_ENCRYPTED		(_AT(pteval_t, 1) << 11)
+ 
+ /*
+  * These are the memory types, defined to be compatible with
+@@ -410,6 +411,7 @@ static inline void set_pte_at(struct mm_struct *mm, unsigned long addr,
+ #define pte_dirty(pte)		(pte_val(pte) & L_PTE_DIRTY)
+ #define pte_young(pte)		(pte_val(pte) & L_PTE_YOUNG)
+ #define pte_exec(pte)		(!(pte_val(pte) & L_PTE_XN))
++#define pte_encrypted(pte)	(pte_val(pte) & L_PTE_ENCRYPTED)
+ #define pte_special(pte)	(0)
+ 
+ #define pte_present_user(pte) \
+@@ -425,6 +427,8 @@ PTE_BIT_FUNC(mkclean,   &= ~L_PTE_DIRTY);
+ PTE_BIT_FUNC(mkdirty,   |= L_PTE_DIRTY);
+ PTE_BIT_FUNC(mkold,     &= ~L_PTE_YOUNG);
+ PTE_BIT_FUNC(mkyoung,   |= L_PTE_YOUNG);
++PTE_BIT_FUNC(mkencrypted, |= L_PTE_ENCRYPTED);
++PTE_BIT_FUNC(mkdecrypted, &= ~L_PTE_ENCRYPTED);
+ 
+ static inline pte_t pte_mkspecial(pte_t pte) { return pte; }
+ 
+diff --git a/arch/arm/kernel/init_task.c b/arch/arm/kernel/init_task.c
+index e7cbb50..825974e 100644
+--- a/arch/arm/kernel/init_task.c
++++ b/arch/arm/kernel/init_task.c
+@@ -35,3 +35,4 @@ union thread_union init_thread_union __init_task_data =
+ struct task_struct init_task = INIT_TASK(init_task);
+ 
+ EXPORT_SYMBOL(init_task);
++EXPORT_SYMBOL(init_mm);
+diff --git a/arch/arm/kernel/smp_tlb.c b/arch/arm/kernel/smp_tlb.c
+index 7dcb352..ba34311 100644
+--- a/arch/arm/kernel/smp_tlb.c
++++ b/arch/arm/kernel/smp_tlb.c
+@@ -102,6 +102,7 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long uaddr)
+ 	} else
+ 		local_flush_tlb_page(vma, uaddr);
+ }
++EXPORT_SYMBOL(flush_tlb_page);
+ 
+ void flush_tlb_kernel_page(unsigned long kaddr)
+ {
+diff --git a/arch/arm/mm/Makefile b/arch/arm/mm/Makefile
+index c3ef296..e466411 100644
+--- a/arch/arm/mm/Makefile
++++ b/arch/arm/mm/Makefile
+@@ -3,7 +3,7 @@
+ #
+ 
+ obj-y				:= extable.o fault.o init.o \
+-				   iomap.o
++				   iomap.o cachelock.o memencrypt.o
+ 
+ ifeq ($(CONFIG_NON_ALIASED_COHERENT_MEM),y)
+ obj-y				+= dma-na-mapping.o
+diff --git a/arch/arm/mm/cache-l2x0.c b/arch/arm/mm/cache-l2x0.c
+index e6871a3..33cc99a 100644
+--- a/arch/arm/mm/cache-l2x0.c
++++ b/arch/arm/mm/cache-l2x0.c
+@@ -19,19 +19,111 @@
+ #include <linux/init.h>
+ #include <linux/spinlock.h>
+ #include <linux/io.h>
++#include <linux/module.h>
+ 
+ #include <asm/cacheflush.h>
+ #include <asm/hardware/cache-l2x0.h>
++#include <mach/iomap.h>
+ 
+ #define CACHE_LINE_SIZE		32
+ 
+ static void __iomem *l2x0_base;
+ static DEFINE_SPINLOCK(l2x0_lock);
+ static uint32_t l2x0_way_mask;	/* Bitmask of active ways */
++static uint32_t l2x0_def_mask;
+ static uint32_t l2x0_size;
+ static u32 l2x0_cache_id;
+ static unsigned int l2x0_sets;
+ static unsigned int l2x0_ways;
++static bool l2x0_locked_ways;
++static bool l2x0_was_locked;
++
++bool cachelock_loaded;
++EXPORT_SYMBOL(cachelock_loaded);
++bool cachelock_loaded_done;
++EXPORT_SYMBOL(cachelock_loaded_done);
++unsigned long cachelock_mem_start;
++EXPORT_SYMBOL(cachelock_mem_start);
++unsigned long cachelock_mem_end;
++EXPORT_SYMBOL(cachelock_mem_end);
++unsigned long cachelock_mem_pa_start;
++EXPORT_SYMBOL(cachelock_mem_pa_start);
++unsigned long cachelock_mem_pa_end;
++EXPORT_SYMBOL(cachelock_mem_pa_end);
++bool cachelock_force_flush;
++EXPORT_SYMBOL(cachelock_force_flush);
++
++static bool l2x0_check_cachelock_range(unsigned long start, unsigned long end)
++{
++	/* Early exit if cachelock driver isn't loaded. */
++	if (!cachelock_loaded) {
++		return 0;
++	}
++
++	/* Align start address to cache line. */
++	if (start & (CACHE_LINE_SIZE - 1)) {
++		start &= ~(CACHE_LINE_SIZE - 1);
++	}
++
++	/* Align end address to cache line. */
++	if (end & (CACHE_LINE_SIZE - 1)) {
++		end &= ~(CACHE_LINE_SIZE - 1);
++	}
++
++	/* Check if any part of the range falls within the locked region. */
++	if (((start >= cachelock_mem_pa_start) &&
++	     (start < cachelock_mem_pa_end)) ||
++	    ((end > cachelock_mem_pa_start) &&
++	     (end <= cachelock_mem_pa_end))) {
++		return 1;
++	}
++
++	return 0;
++}
++
++static inline bool l2x0_check_cachelock_line(unsigned long start)
++{
++	return l2x0_check_cachelock_range(start, start + CACHE_LINE_SIZE);
++}
++
++static inline void l2x0_set_mask(void)
++{
++	void __iomem *p;
++	uint32_t mask;
++
++	/* Early exit if the cachelock driver isn't done loading. */
++	if (!cachelock_loaded_done) {
++		l2x0_locked_ways = 0;
++		return;
++	}
++
++	l2x0_way_mask = l2x0_def_mask;
++
++	/* If we're not forcing a flush, mask out locked ways. */
++	if (likely(!cachelock_force_flush)) {
++		/* Get the lockdown mask. */
++		p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++		mask = readl(p + L2X0_LOCKDOWN_WAY_D_BASE);
++
++		if (!mask) {
++			pr_err("l2x0_set_mask: l2x0_way_mask = %x\n",
++			       l2x0_way_mask);
++			pr_err("l2x0_set_mask: mask = %x\n", mask);
++			dump_stack();
++		}
++		/* Mask out locked ways. */
++		l2x0_way_mask &= ~mask;
++
++		/* Check if any ways are actually locked. */
++		if (l2x0_way_mask != l2x0_def_mask) {
++			l2x0_locked_ways = 1;
++		} else {
++			l2x0_locked_ways = 0;
++		}
++	} else {
++		l2x0_locked_ways = 0;
++	}
++}
+ 
+ static inline bool is_pl310_rev(int rev)
+ {
+@@ -72,6 +164,13 @@ static inline void cache_sync(void)
+ static inline void l2x0_clean_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
++
++	/* If clean includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: clean_line: locked line\n");
++		return;
++	}
++
+ 	cache_wait(base + L2X0_CLEAN_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_CLEAN_LINE_PA);
+ }
+@@ -79,6 +178,13 @@ static inline void l2x0_clean_line(unsigned long addr)
+ static inline void l2x0_inv_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
++
++	/* If invalidate includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: inv_line: locked line\n");
++		return;
++	}
++
+ 	cache_wait(base + L2X0_INV_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_INV_LINE_PA);
+ }
+@@ -105,6 +211,12 @@ static inline void l2x0_flush_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
+ 
++	/* If flush includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: flush_line: locked line\n");
++		return;
++	}
++
+ 	/* Clean by PA followed by Invalidate by PA */
+ 	cache_wait(base + L2X0_CLEAN_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_CLEAN_LINE_PA);
+@@ -116,6 +228,13 @@ static inline void l2x0_flush_line(unsigned long addr)
+ static inline void l2x0_flush_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
++
++	/* If flush includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: flush_line: locked line\n");
++		return;
++	}
++
+ 	cache_wait(base + L2X0_CLEAN_INV_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_CLEAN_INV_LINE_PA);
+ }
+@@ -150,6 +269,7 @@ static void l2x0_for_each_set_way(void __iomem *reg)
+ static void __l2x0_flush_all(void)
+ {
+ 	debug_writel(0x03);
++
+ 	writel_relaxed(l2x0_way_mask, l2x0_base + L2X0_CLEAN_INV_WAY);
+ 	cache_wait_way(l2x0_base + L2X0_CLEAN_INV_WAY, l2x0_way_mask);
+ 	cache_sync();
+@@ -213,6 +333,12 @@ static void l2x0_inv_range(unsigned long start, unsigned long end)
+ 	void __iomem *base = l2x0_base;
+ 	unsigned long flags;
+ 
++	/* If invalidate includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_range(start, end)) {
++		pr_err("L310: inv_range: locked range\n");
++		return;
++	}
++
+ 	spin_lock_irqsave(&l2x0_lock, flags);
+ 	if (start & (CACHE_LINE_SIZE - 1)) {
+ 		start &= ~(CACHE_LINE_SIZE - 1);
+@@ -252,6 +378,12 @@ static void l2x0_clean_range(unsigned long start, unsigned long end)
+ 	void __iomem *base = l2x0_base;
+ 	unsigned long flags;
+ 
++	/* If clean includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_range(start, end)) {
++		pr_err("L310: clean_range: locked range\n");
++		return;
++	}
++
+ 	if ((end - start) >= l2x0_size) {
+ 		l2x0_clean_all();
+ 		return;
+@@ -282,6 +414,12 @@ static void l2x0_flush_range(unsigned long start, unsigned long end)
+ 	void __iomem *base = l2x0_base;
+ 	unsigned long flags;
+ 
++	/* If flush includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_range(start, end)) {
++		pr_err("L310: flush_range: locked range\n");
++		return;
++	}
++
+ 	if ((end - start) >= l2x0_size) {
+ 		l2x0_flush_all();
+ 		return;
+@@ -357,6 +495,15 @@ void l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
+ 	__u32 way_size = 0;
+ 	const char *type;
+ 
++	l2x0_was_locked = 0;
++	l2x0_locked_ways = 0;
++	cachelock_loaded = 0;
++	cachelock_loaded_done = 0;
++	cachelock_mem_start = 0;
++	cachelock_mem_end = 0;
++	cachelock_mem_pa_start = 0;
++	cachelock_mem_pa_end = 0;
++
+ 	l2x0_base = base;
+ 
+ 	l2x0_cache_id = readl_relaxed(l2x0_base + L2X0_CACHE_ID);
+@@ -387,6 +534,9 @@ void l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
+ 
+ 	l2x0_way_mask = (1 << l2x0_ways) - 1;
+ 
++	/* Get the default way mask. */
++	l2x0_def_mask = l2x0_way_mask;
++
+ 	/*
+ 	 * L2 cache Size =  Way size * Number of ways
+ 	 */
+@@ -423,6 +573,8 @@ void l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
+ 	outer_cache.set_debug = l2x0_set_debug;
+ 
+ 	pr_info_once("%s cache controller enabled\n", type);
+-	pr_info_once("l2x0: %d ways, CACHE_ID 0x%08x, AUX_CTRL 0x%08x, Cache size: %d B\n",
+-			l2x0_ways, l2x0_cache_id, aux, l2x0_size);
++	pr_info_once("l2x0: %d ways, CACHE_ID 0x%08x, AUX_CTRL 0x%08x, " \
++	             "Cache size: %d B\n", l2x0_ways, l2x0_cache_id, aux,
++	             l2x0_size);
++	pr_info_once("%s: l2x0: cachelock aware cache\n", type);
+ }
+diff --git a/arch/arm/mm/cachelock.c b/arch/arm/mm/cachelock.c
+new file mode 100644
+index 0000000..b3daf97
+--- /dev/null
++++ b/arch/arm/mm/cachelock.c
+@@ -0,0 +1,398 @@
++#include <asm/tlbflush.h>
++#include <linux/mm.h>
++#include <linux/pagemap.h>
++#include <linux/mmu_notifier.h>
++#include <linux/swap.h>
++
++#include <linux/vmalloc.h>
++#include <linux/highmem.h>
++#include <linux/list.h>
++#include <linux/rmap.h>
++#include <linux/slab.h>
++#include <linux/types.h>
++#include <linux/memencrypt.h>
++#include <linux/cachelock.h>
++#include <linux/cachelock_pool.h>
++#include <linux/memencrypt.h>
++
++#define CL_FLAGS	1
++
++static unsigned long aligned_start;
++static unsigned long aligned_end;
++static unsigned long aligned_size;
++static unsigned long aligned_pages;
++
++static cl_pool_t cl_pool;
++static cl_block_t *cl_blocks;
++
++static struct page *get_locked_page(cl_block_t *block)
++{
++	return phys_to_page(__pa(block->cl_addr));
++}
++
++static inline void release_slot(cl_pool_t *pool, cl_block_t *block)
++{
++	list_add_tail(&block->list, &pool->free_list);
++	pool->free_slots++;
++}
++
++static cl_block_t *get_slot(cl_pool_t *pool)
++{
++	cl_block_t *block;
++
++	/* If no more free slots, evict a page. */
++	/* XXX: Just evict one at a time or do it in batches? */
++	if (pool->free_slots == 0) {
++		return NULL;
++	}
++
++	/* Get next empty slot. */
++	block = list_first_entry(&pool->free_list, cl_block_t, list);
++	list_del(&block->list);
++	pool->free_slots--;
++
++	/* Initialise. */
++	block->addr = 0;
++
++	return block;
++}
++
++static int write_protect_page(struct vm_area_struct *vma, struct page *page,
++                              pte_t *orig_pte)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	unsigned long addr;
++	pte_t *ptep;
++	spinlock_t *ptl;
++	int swapped;
++	int err = -EFAULT;
++
++	/* Cache-locked page not in the VMA. */
++	addr = page_address_in_vma(page, vma);
++	if (addr == -EFAULT) {
++		pr_err("cachelock: write_protect_page: addr == -EFAULT\n");
++		goto out;
++	}
++
++	BUG_ON(PageTransCompound(page));
++	ptep = page_check_address(page, mm, addr, &ptl, 0);
++	if (!ptep) {
++		pr_err("cachelock: write_protect_page: ptep == NULL\n");
++		goto out;
++	}
++
++	if (pte_write(*ptep) || pte_dirty(*ptep)) {
++		pte_t entry;
++
++		swapped = PageSwapCache(page);
++		flush_cache_page(vma, addr, page_to_pfn(page));
++		/* OK this is tricky, when get_user_pages_fast() runs it doesn't
++		 * take any lock, therefore the check that we are going to make
++		 * with the pagecount against the mapcount is racey and
++		 * O_DIRECT can happen right after the check.
++		 * So we clear the pte and flush the tlb before the check
++		 * this assure us that no O_DIRECT can happen after the check
++		 * or in the middle of the check. */
++		entry = ptep_clear_flush(vma, addr, ptep);
++		/* Check that no O_DIRECT or similar I/O is in progress on the
++		 * page. */
++		if (page_mapcount(page) + 1 + swapped != page_count(page)) {
++			set_pte_at(mm, addr, ptep, entry);
++			goto out_unlock;
++		}
++
++		if (pte_dirty(entry)) {
++			set_page_dirty(page);
++		}
++		entry = pte_mkclean(pte_wrprotect(entry));
++		set_pte_at_notify(mm, addr, ptep, entry);
++	}
++
++	*orig_pte = *ptep;
++	err = 0;
++
++out_unlock:
++	pte_unmap_unlock(ptep, ptl);
++out:
++	return err;
++}
++
++/**
++ * replace_page - replace page in vma by new ksm page
++ * @vma:      vma that holds the pte pointing to page
++ * @page:     the page we are replacing by kpage
++ * @kpage:    the ksm page we replace page by
++ * @orig_pte: the original value of the pte
++ *
++ * Returns 0 on success, -EFAULT on failure.
++ */
++static int replace_page(struct vm_area_struct *vma, struct page *old_page,
++                        struct page *new_page, pte_t orig_pte)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *ptep;
++	spinlock_t *ptl;
++	unsigned long addr;
++	int err = -EFAULT;
++
++	addr = page_address_in_vma(old_page, vma);
++	if (addr == -EFAULT) {
++		pr_err("cachelock: replace_page: addr == -EFAULT\n");
++		goto out;
++	}
++
++	pgd = pgd_offset(mm, addr);
++	if (!pgd_present(*pgd)) {
++		pr_err("cachelock: replace_page: pgd not present\n");
++		goto out;
++	}
++
++	pud = pud_offset(pgd, addr);
++	if (!pud_present(*pud)) {
++		pr_err("cachelock: replace_page: pud not present\n");
++		goto out;
++	}
++
++	pmd = pmd_offset(pud, addr);
++	BUG_ON(pmd_trans_huge(*pmd));
++	if (!pmd_present(*pmd)) {
++		pr_err("cachelock: replace_page: pmd not present\n");
++		goto out;
++	}
++
++	ptep = pte_offset_map_lock(mm, pmd, addr, &ptl);
++	if (!pte_same(*ptep, orig_pte)) {
++		pr_err("cachelock: replace_page: ptes don't match\n");
++		pte_unmap_unlock(ptep, ptl);
++		goto out;
++	}
++
++	get_page(new_page);
++	page_add_anon_rmap(new_page, vma, addr);
++
++	flush_cache_page(vma, addr, pte_pfn(*ptep));
++	ptep_clear_flush(vma, addr, ptep);
++	set_pte_at_notify(mm, addr, ptep, mk_pte(new_page, vma->vm_page_prot));
++
++	page_remove_rmap(old_page);
++	if (!page_mapped(old_page)) {
++		try_to_free_swap(old_page);
++	}
++
++	put_page(old_page);
++
++	pte_unmap_unlock(ptep, ptl);
++	err = 0;
++out:
++	return err;
++}
++
++static struct page *remap_page(struct vm_area_struct *vma,
++                               struct page *src_page, struct page *dst_page)
++{
++	pte_t orig_pte = __pte(0);
++	struct page *page = src_page;
++	void *src_mem;
++	void *dst_mem;
++	int err;
++#if CL_FLAGS
++	unsigned long flags;
++#endif
++
++	/* Lock pages. */
++	lock_page(src_page);
++	lock_page(dst_page);
++
++	/* Replace the page in the page table. */
++	if (write_protect_page(vma, src_page, &orig_pte) == 0) {
++		mark_page_accessed(dst_page);
++
++		err = replace_page(vma, src_page, dst_page, orig_pte);
++		if (err < 0) {
++			pr_err("cachelock: remap_page: replace_page failed: " \
++			       "err = %d\n", err);
++			goto out;
++		}
++
++		/* Copy page from source to destination. */
++		src_mem = kmap(src_page);
++		dst_mem = kmap(dst_page);
++		copy_page(dst_mem, src_mem);
++		memset(src_mem, 0, PAGE_SIZE);
++		kunmap(dst_page);
++		kunmap(src_page);
++
++		/* It's now safe to point to the destination page. */
++		page = dst_page;
++	} else {
++		pr_err("cachelock: remap_page: error replacing page\n");
++	}
++
++#if CL_FLAGS
++	/* Copy page flags. */
++	flags = dst_page->flags ;
++	dst_page->flags = src_page->flags;
++	src_page->flags = flags;
++
++	src_page->mapping = NULL;
++#endif
++
++	unlock_page(dst_page);
++	unlock_page(src_page);
++
++out:
++	return page;
++}
++
++static struct page *cl_store_page(cl_pool_t *pool, struct mm_struct *mm,
++                                  struct vm_area_struct *vma,
++                                  struct page *memory_page)
++{
++	struct page *page = NULL;
++	unsigned long addr;
++	cl_block_t *block;
++
++	get_page(memory_page);
++
++	addr = page_address_in_vma(memory_page, vma);
++
++	/* Get a free slot (a page from the free list). */
++	block = get_slot(pool);
++	/* If we're out of pages, copy a page back out from cache-locked
++	 * memory to normal memory. */
++	if (!block) {
++		struct vm_area_struct *old_memory_vma;
++		unsigned long old_memory_addr;
++		struct page *old_memory_page;
++		struct page *locked_page;
++
++		/* Remove the first entry on the taken list. */
++		block = list_first_entry(&pool->taken_list, cl_block_t, list);
++		list_del(&block->list);
++
++		old_memory_addr = block->addr;
++		old_memory_vma = find_vma(mm, old_memory_addr);
++		old_memory_page = block->page;
++
++		locked_page = get_locked_page(block);
++
++		/* Encrypt the page. */
++		if (encrypt_page(locked_page, old_memory_addr)) {
++			pte_t *ptep;
++			pte_t pte;
++
++			ptep = vir_to_pte(mm, old_memory_addr);
++
++			/* Remap the page back to memory. */
++			page = remap_page(old_memory_vma, locked_page, old_memory_page);
++
++			/* Now that the encrypted page is back in memory,
++			 * reset it's flags and state. */
++			ptep_test_and_clear_young(old_memory_vma, old_memory_addr, ptep);
++			pte = pte_mkencrypted(*ptep);
++			set_pte_at(mm, old_memory_addr, ptep, pte);
++			flush_tlb_page(old_memory_vma, old_memory_addr);
++
++			/* If we actually remapped the page, clean up. */
++			if (page == block->page) {
++				block->page = NULL;
++				block->addr = 0;
++			}
++		} else {
++			pr_err("cachelock: cl_store_page: error encrypting\n");
++			page = memory_page;
++			goto out;
++		}
++	}
++
++	/* Remap the page to the cache-locked area. */
++	page = remap_page(vma, memory_page, get_locked_page(block));
++
++	/* If we actually remapped the page, store the original page so we
++	 * can remap back to it. */
++	if (page != memory_page) {
++		block->page = memory_page;
++		block->addr = addr;
++	}
++
++	/* Add it to the taken list. */
++	list_add_tail(&block->list, &pool->taken_list);
++
++out:
++	return page;
++}
++
++struct page *cachelock_remap_page(struct mm_struct *mm, unsigned long addr,
++                                  struct page *page)
++{
++	struct vm_area_struct *vma;
++	struct page *new_page = page;
++
++	/* Only do stuff if the cache-lock module has been loaded, otherwise
++	 * we just return the page we got (i.e., do nothing). */
++	if (cachelock_loaded) {
++		vma = find_vma(mm, addr);
++		new_page = cl_store_page(&cl_pool, mm, vma, page);
++	}
++
++	return new_page;
++}
++
++int cachelock_pool_init()
++{
++	cl_block_t *block;
++	int alloc_order;
++	struct page *cachelock_page;
++	unsigned i;
++
++	/* We don't want to overwrite the AES stuff. */
++	aligned_start = cachelock_mem_start + CACHELOCK_AES_SIZE;
++
++	/* Align start to the next page boundary. */
++	aligned_start = (aligned_start + (PAGE_SIZE-1)) & PAGE_MASK;
++
++	/* Align end to the previous page boundary. */
++	aligned_end = cachelock_mem_end & PAGE_MASK;
++
++	/* Get the number of pages available for use. */
++	aligned_size = aligned_end - aligned_start;
++	aligned_pages = aligned_size / PAGE_SIZE;
++
++	/* Get the allocation order. */
++	alloc_order = get_order(aligned_size + PAGE_SIZE);
++
++	/* Split the pages from the initial mapping. */
++	cachelock_page = phys_to_page(__pa(cachelock_mem_start));
++	split_page(cachelock_page, alloc_order);
++
++	/* Allocate the page structs. */
++	cl_blocks = kmalloc(sizeof(cl_block_t) * aligned_pages, GFP_KERNEL);
++	if (!cl_blocks) {
++		pr_err("cachelock: cachelock_remap_page: unable to allocate " \
++		       "cl_pages memory\n");
++		return -ENOMEM;
++	}
++
++	/* Initially everything is free. */
++	cl_pool.free_slots = aligned_pages;
++
++	INIT_LIST_HEAD(&cl_pool.free_list);
++	INIT_LIST_HEAD(&cl_pool.taken_list);
++
++	/* Add all new pages to the free list. */
++	for (i = 0, block = cl_blocks; i < aligned_pages; i++, block++) {
++		block->addr = 0;
++		block->cl_addr = aligned_start + (i * PAGE_SIZE);
++
++		list_add_tail(&block->list, &cl_pool.free_list);
++	}
++
++	pr_info("cachelock: pool size = 0x%lx (%ld pages)\n", aligned_size,
++	        aligned_pages);
++
++	return 0;
++}
++EXPORT_SYMBOL(cachelock_pool_init);
+diff --git a/arch/arm/mm/fault.c b/arch/arm/mm/fault.c
+index 3b5ea68..784c1ae 100644
+--- a/arch/arm/mm/fault.c
++++ b/arch/arm/mm/fault.c
+@@ -19,6 +19,7 @@
+ #include <linux/sched.h>
+ #include <linux/highmem.h>
+ #include <linux/perf_event.h>
++#include <linux/memencrypt.h>
+ 
+ #include <asm/system.h>
+ #include <asm/pgtable.h>
+@@ -210,6 +211,7 @@ void do_bad_area(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ #ifdef CONFIG_MMU
+ #define VM_FAULT_BADMAP		0x010000
+ #define VM_FAULT_BADACCESS	0x020000
++#define VM_FAULT_ENCRYPTED	0x040000
+ 
+ /*
+  * Check that the permissions on the VMA allow for the fault which occurred.
+@@ -234,7 +236,38 @@ __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
+ {
+ 	struct vm_area_struct *vma;
+ 	int fault;
++	pte_t *ptep;
++	pte_t pte;
++	struct page *page;
+ 
++	ptep = vir_to_pte(mm, addr);
++	if (ptep == NULL) {
++		goto normal;
++	}
++
++	if (!pte_encrypted(*ptep)) {
++		goto normal;
++	}
++
++	page = pte_page(*ptep);
++	if (page == NULL) {
++		goto normal;
++	}
++
++	if (!PageEncrypted(page)) {
++		pte = pte_mkdecrypted(*ptep);
++		set_pte_at(mm, addr, ptep, pte);
++		goto normal;
++	}
++
++	if (decrypt_page(mm, addr, page)) {
++		fault = VM_FAULT_ENCRYPTED;
++		pte = pte_mkyoung(pte_mkdecrypted(*ptep));
++		set_pte_at(mm, addr, ptep, pte);
++		goto out;
++	}
++
++normal:
+ 	vma = find_vma(mm, addr);
+ 	fault = VM_FAULT_BADMAP;
+ 	if (unlikely(!vma))
+@@ -320,6 +353,10 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	}
+ 
+ 	fault = __do_page_fault(mm, addr, fsr, tsk);
++	if (fault & VM_FAULT_ENCRYPTED) {
++		up_read(&mm->mmap_sem);
++		return 0;
++	}
+ 	up_read(&mm->mmap_sem);
+ 
+ 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
+diff --git a/arch/arm/mm/memencrypt.c b/arch/arm/mm/memencrypt.c
+new file mode 100644
+index 0000000..6071bed
+--- /dev/null
++++ b/arch/arm/mm/memencrypt.c
+@@ -0,0 +1,711 @@
++#include <asm/tlbflush.h>
++#include <linux/crypto.h>
++#include <linux/memencrypt.h>
++#include <linux/proc_fs.h>
++#include <linux/scatterlist.h>
++#include <linux/sched.h>
++#include <linux/vmalloc.h>
++#include <linux/cachelock.h>
++#include <linux/cachelock_pool.h>
++
++struct task_struct;
++
++static const char blkcipher_alg[] = "cbc(aes)";
++static int init_blkcipher_desc(struct blkcipher_desc *desc);
++
++static void encrypt_process(pid_t pid);
++static void update_pte_task(struct task_struct *task);
++static void update_pte_vma(struct mm_struct *mm, struct vm_area_struct *vma);
++static void update_pte_vmalloc(void);
++static pte_t *virt_to_ptep_k(const unsigned long addr);
++static const char *memencrypt_vma_name(struct vm_area_struct *vma);
++
++static pid_t pid = 0;
++
++static unsigned long proc_enc_page_count = 0;
++static unsigned long memencrypt_page_count = 0;
++static unsigned long memdecrypt_page_count = 0;
++
++struct page *vir_to_page(struct mm_struct *mm, unsigned long addr)
++{
++	pte_t *ptep, pte;
++	struct page *pg;
++
++	ptep = vir_to_pte(mm, addr);
++	if (ptep == NULL) {
++		return NULL;
++	}
++
++	pte = *ptep;
++	if (pte_present(pte)) {
++		/* Only encrypt pages that are present in memory. */
++		pg = pte_page(pte);
++		return pg;
++	}
++	else {
++		return NULL;
++	}
++}
++
++pte_t *vir_to_pte(struct mm_struct *mm, unsigned long addr)
++{
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *ptep;
++
++	pgd = pgd_offset(mm, addr);
++	if (pgd_none(*pgd) || pgd_bad(*pgd)) {
++		goto err;
++	}
++
++	pud = pud_offset(pgd, addr);
++	if (pud_none(*pud) || pud_bad(*pud)) {
++		goto err;
++	}
++
++	pmd = pmd_offset(pud, addr);
++	if (pmd_none(*pmd) || pmd_bad(*pmd)) {
++		goto err;
++	}
++
++	ptep = pte_offset_map(pmd, addr);
++	if (!ptep) {
++		goto err;
++	}
++
++	return ptep;
++
++err:
++	return NULL;
++}
++
++/*
++ * Walk the kernel page table to find the pte of a kernel virtual address.
++ */
++static pte_t *virt_to_ptep_k(const unsigned long addr)
++{
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *ptep;
++
++	pgd = pgd_offset_k(addr);
++	if (pgd_none(*pgd) || pgd_bad(*pgd)) {
++		goto err;
++	}
++
++	pud = pud_offset(pgd, addr);
++	if (pud_none(*pud) || pud_bad(*pud)) {
++		goto err;
++	}
++
++	pmd = pmd_offset(pud, addr);
++	if (pmd_none(*pmd) || pmd_bad(*pmd)) {
++		goto err;
++	}
++
++	ptep = pte_offset_map(pmd, addr);
++	if (ptep == NULL) {
++		goto err;
++	}
++
++	return ptep;
++
++err:
++	return NULL;
++}
++
++static void update_pte_vma(struct mm_struct *mm, struct vm_area_struct *vma)
++{
++	unsigned long num_pages;
++	unsigned long addr;
++	struct page *page;
++	pte_t pte;
++	pte_t *ptep;
++	unsigned i;
++
++	/* Calculate the number of pages in the VMA. */
++	num_pages = (vma->vm_end - vma->vm_start) / PAGE_SIZE;
++	addr = vma->vm_start;
++	for (i = 0; i < num_pages; i++, addr += PAGE_SIZE) {
++		page = vir_to_page(mm, addr);
++		if (page == NULL) {
++			continue;
++		}
++
++		ptep = vir_to_pte(mm, addr);
++		if (ptep == NULL) {
++			continue;
++		}
++
++		if (PageEncrypted(page)) {
++			ptep_test_and_clear_young(vma, addr, ptep);
++			pte = pte_mkencrypted(*ptep);
++			set_pte_at(mm, addr, ptep, pte);
++			flush_tlb_page(vma, addr);
++		}
++	}
++}
++
++static void update_pte_task(struct task_struct *task)
++{
++	struct mm_struct *mm;
++	struct vm_area_struct *vma;
++	unsigned i;
++
++	mm = task->mm;
++	if (!mm){
++		return;
++	}
++
++	vma = mm->mmap;
++	for (i = 0; i < mm->map_count && vma != NULL; i++) {
++		update_pte_vma(mm, vma);
++		vma = vma->vm_next;
++	}
++}
++
++static void update_pte_vmalloc(void)
++{
++	unsigned long count = 0;
++	struct vm_struct *vma;
++	unsigned long pfn;
++	struct page *page;
++	pte_t *ptep;
++	pte_t pte;
++	void *addr;
++
++	read_lock(&vmlist_lock);
++	for (vma = vmlist; vma; vma = vma->next) {
++		if (vma->size == PAGE_SIZE) {
++			continue;
++		}
++
++		for (addr = vma->addr; addr < (vma->addr + vma->size - PAGE_SIZE); addr += PAGE_SIZE) {
++			if ((unsigned long)addr < VMALLOC_START) {
++				continue;
++			}
++			if ((unsigned long)addr >= VMALLOC_END) {
++				break;
++			}
++
++			ptep = virt_to_ptep_k((unsigned long)addr);
++			if ((ptep == NULL) || !pte_present(*ptep)) {
++				continue;
++			}
++
++			pfn = pte_pfn(*ptep);
++			if (!pfn_valid(pfn)) {
++				continue;
++			}
++
++			page = pte_page(*ptep);
++			if (page == NULL) {
++				continue;
++			}
++
++			if (PageEncrypted(page)) {
++				pr_debug("memencrypt: update_pte_vmalloc: " \
++				         "vmalloc PageEncrypted; pfn = %lx; "\
++				         "addr = %lx\n", page_to_pfn(page),
++				         (unsigned long)addr);
++				pte = *ptep;
++				pte = pte_mkencrypted(pte);
++				pte = pte_mkold(pte);
++				set_pte_at(&init_mm, (unsigned long)addr, ptep, pte);
++				flush_tlb_kernel_page((unsigned long)addr);
++			}
++
++			count++;
++		}
++
++	}
++	read_unlock(&vmlist_lock);
++}
++
++static int init_blkcipher_desc(struct blkcipher_desc *desc)
++{
++	const u8 key[16]= "my key";
++	const u8 iv[16]= "my iv";
++	unsigned int key_len = 16;
++	unsigned int ivsize = 16;
++	int rc;
++
++	desc->tfm = crypto_alloc_blkcipher(blkcipher_alg, 0, CRYPTO_ALG_ASYNC);
++	if (IS_ERR(desc->tfm)) {
++		pr_err("memencrypt: init_blkcipher_desc: encrypted_key: " \
++		       "failed to load %s, tfm = %ld\n", blkcipher_alg,
++		       PTR_ERR(desc->tfm));
++		return PTR_ERR(desc->tfm);
++	}
++	desc->flags = 0;
++
++	rc = crypto_blkcipher_setkey(desc->tfm, key, key_len);
++	if (rc < 0) {
++		pr_err("memencrypt: init_blkcipher_desc: failed to set key " \
++		       "(rc = %d)\n", rc);
++		crypto_free_blkcipher(desc->tfm);
++		return rc;
++	}
++	crypto_blkcipher_set_iv(desc->tfm, iv, ivsize);
++
++	return 0;
++}
++
++bool encrypt_page(struct page *page, unsigned long addr)
++{
++	struct blkcipher_desc encrypt_desc;
++	struct scatterlist sg;
++	int offset = 0;
++	int rc;
++	bool ret = true;
++
++	/* Check if the page is already enrypted. */
++	if (PageEncrypted(page) ) {
++		pr_warning("memencrypt: encrypt_page: Trying to encrypt an " \
++		           "encrypted page\n");
++		ret = false;
++		goto err;
++	}
++
++	sg_init_table(&sg, 1);
++	sg_set_page(&sg, page, PAGE_SIZE, offset);
++
++	rc = init_blkcipher_desc(&encrypt_desc);
++	if (rc < 0) {
++		pr_err("memencrypt: encrypt_page: init_blkciper_desc failed\n");
++		ret = false;
++		goto err;
++	}
++
++	/* Encrypt the page. */
++	rc = crypto_blkcipher_encrypt(&encrypt_desc, &sg, &sg, PAGE_SIZE);
++	if (rc < 0) {
++		pr_err("memencrypt: encrypt_page: crypto_blkcipher_encrypt " \
++		       "failed (%d)\n", rc);
++		ret = false;
++		goto err;
++	}
++
++	/* Mark page as encrypted. */
++	if (cachelock_loaded) {
++		SetPageEncrypted(page);
++	}
++
++	memencrypt_page_count++;
++
++err:
++	return ret;
++}
++
++void encrypt_vma(struct mm_struct *mm, struct vm_area_struct *vma)
++{
++	struct page *page;
++	pte_t *ptep;
++	pte_t pte;
++	unsigned long num_pages = 0;
++	unsigned long addr;
++	unsigned i;
++
++	/* Calculate the number of pages in the VMA. */
++	num_pages = (vma->vm_end - vma->vm_start) / PAGE_SIZE;
++
++	/* Skip CPU vector area. */
++	if (memencrypt_vma_name(vma)) {
++		pr_debug("memencrypt: encrypt_vma: [vector] vma, skipping " \
++		         "(vm_start = 0x%lx, vm_end = 0x%lx, pages = %ld)\n",
++		         vma->vm_start, vma->vm_end, num_pages);
++		return;
++	}
++
++	addr = vma->vm_start;
++	for (i = 0; i < num_pages; i++, addr += PAGE_SIZE) {
++		ptep = vir_to_pte(mm, addr);
++		if (ptep == NULL) {
++			continue;
++		}
++
++		page = vir_to_page(mm, addr);
++		if (page == NULL) {
++			continue;
++		}
++
++		/* Only encrypt pages with a count of 1 (no shared pages). */
++		if (page_count(page) > 1) {
++			continue;
++		}
++
++		/* Only encrypt pages that are mapped in. */
++		if (page_mapcount(page) <= 0) {
++			continue;
++		}
++
++		if (encrypt_page(page, addr)) {
++			ptep_test_and_clear_young(vma, addr, ptep);
++			pte = pte_mkencrypted(*ptep);
++			set_pte_at(mm, addr, ptep, pte);
++			flush_tlb_page(vma, addr);
++		}
++	}
++}
++
++void encrypt_task(struct task_struct *task)
++{
++	struct mm_struct *mm;
++	struct vm_area_struct *vma;
++	unsigned i;
++
++	mm = task->mm;
++	if (!mm){
++		return;
++	}
++
++	vma = mm->mmap;
++	for (i = 0; (i < mm->map_count) && (vma != NULL); i++) {
++		/* Only encrypt non-shared, non-reserved memory. */
++		if (!((vma->vm_flags & VM_SHARED) || (vma->vm_flags & VM_RESERVED))) {
++			encrypt_vma(mm, vma);
++		}
++		vma = vma->vm_next;
++	}
++}
++
++static void encrypt_process(pid_t pid)
++{
++	struct task_struct *target_task;
++	struct task_struct *task;
++	bool task_found = false;
++	int cpu;
++
++	memencrypt_page_count = 0;
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	/* Find the desired task. */
++	for_each_process(task) {
++		if (pid == task->pid) {
++			task_found = true;
++			target_task = task;
++			break;
++		}
++	}
++	if (!task_found) {
++		pr_err("memencrypt: encrypt_process: task [pid %d] not found\n",
++		       pid);
++		goto err;
++	}
++
++	/* Stop the task. */
++	kill_pid(task_pid(target_task), SIGSTOP, 1);
++
++	/* Encrypt the task. */
++	encrypt_task(target_task);
++
++	proc_enc_page_count = memencrypt_page_count;
++	memencrypt_page_count = 0;
++
++	/* Update vmalloc PTEs. */
++	update_pte_vmalloc();
++
++	/* Update task PTEs. */
++	for_each_process(task) {
++		update_pte_task(task);
++	}
++
++	/* Start the stopped task. */
++	kill_pid(task_pid(target_task), SIGCONT, 1);
++
++err:
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++}
++
++bool decrypt_page(struct mm_struct *mm, unsigned long addr, struct page *page)
++{
++	struct blkcipher_desc decrypt_desc;
++	struct scatterlist sg;
++	int offset = 0;
++	int rc;
++	bool ret;
++	int cpu;
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	if (!PageEncrypted(page)) {
++		pr_warning("memencrypt: decrypt_page: trying to decrypt an " \
++		           "unencrypted page\n");
++		ret = false;
++		goto err;
++	}
++
++	/* With cache-locking, clear the page first, before we remap it. */
++	if (cachelock_loaded) {
++		ClearPageEncrypted(page);
++	}
++
++	/* Get the cache-locked copy of the page */
++	page = cachelock_remap_page(mm, addr, page);
++
++	sg_init_table(&sg, 1);
++	sg_set_page(&sg, page, PAGE_SIZE, offset);
++
++	rc = init_blkcipher_desc(&decrypt_desc);
++	if (rc < 0) {
++		pr_err("memencrypt: decrypt_page: init_blkciper_desc failed\n");
++		ret = false;
++		goto err;
++	}
++
++	/* Decrypt the page. */
++	rc = crypto_blkcipher_decrypt(&decrypt_desc, &sg, &sg, PAGE_SIZE);
++	if (rc < 0) {
++		pr_err("memencrypt: decrypt_page: crypto_blkcipher_decrypt " \
++		       "failed (%d)\n", rc);
++		ret = false;
++		goto out;
++	}
++
++	/* Unmark page as encrypted. */
++	if (!cachelock_loaded) {
++		ClearPageEncrypted(page);
++	}
++
++	/* Count the page access. */
++	memdecrypt_page_count++;
++
++out:
++	crypto_free_blkcipher(decrypt_desc.tfm);
++
++err:
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return ret;
++}
++
++void decrypt_vma(struct mm_struct *mm, struct vm_area_struct *vma)
++{
++	unsigned long num_pages = 0;
++	unsigned long addr;
++	struct page *page;
++	pte_t *ptep;
++	pte_t pte;
++	unsigned i;
++
++	/* Calculate the number of pages in the VMA. */
++	num_pages = (vma->vm_end - vma->vm_start) / PAGE_SIZE;
++
++	addr = vma->vm_start;
++	for (i = 0; i < num_pages; i++, addr += PAGE_SIZE) {
++		ptep = vir_to_pte(mm, addr);
++		if (ptep == NULL) {
++			continue;
++		}
++
++		page = vir_to_page(mm, addr);
++		if (page == NULL) {
++			continue;
++		}
++
++		if (!PageEncrypted(page)) {
++			continue;
++		}
++
++		if (decrypt_page(mm, addr, page)) {
++			pte = pte_mkdecrypted(*ptep);
++			set_pte_at(mm, addr, ptep, pte);
++			flush_tlb_page(vma, addr);
++		}
++	}
++}
++
++void decrypt_dma(struct task_struct* task)
++{
++	struct mm_struct *mm;
++	struct vm_area_struct *vma;
++	unsigned i;
++
++	mm = task->mm;
++	if (!mm){
++		return;
++	}
++
++	vma = mm->mmap;
++
++	for (i = 0; (i < mm->map_count) && (vma != NULL); i++) {
++		if (vma->vm_flags & VM_RESERVED) {
++			pr_err("memencrypt: decrypt_dma:%s  VM_RESERVED, " \
++			       "decrypt vma\n", task->comm);
++			decrypt_vma(mm, vma);
++		}
++		vma = vma->vm_next;
++	}
++}
++
++static const char *memencrypt_vma_name(struct vm_area_struct *vma)
++{
++	return (vma->vm_start == 0xffff0000) ? "[vectors]" : NULL;
++}
++
++#ifdef CONFIG_PROC_FS
++struct proc_dir_entry *base_dir;
++
++static int string_to_number(char *s)
++{
++	int r = 0;
++	int base = 0;
++	int pn = 1;
++
++	if (!strncmp(s, "-", 1)) {
++		pn = -1;
++		s++;
++	}
++	if (!strncmp(s, "0x", 2) || !strncmp(s, "0X", 2)) {
++		base = 16;
++		s += 2;
++	} else {
++		base = 10;
++	}
++
++	for (s = s; *s; s++) {
++		if ((*s >= '0') && (*s <= '9'))
++			r = (r * base) + (*s - '0');
++		else if ((*s >= 'A') && (*s <= 'F'))
++			r = (r * base) + (*s - 'A' + 10);
++		else if ((*s >= 'a') && (*s <= 'f'))
++			r = (r * base) + (*s - 'a' + 10);
++		else
++			break;
++	}
++
++	return (r * pn);
++}
++
++static int proc_write_pid(struct file *file, const char *buffer,
++                          unsigned long count, void *data)
++{
++	char *buf;
++
++	if (count < 1) {
++		return -EINVAL;
++	}
++
++	buf = kmalloc(count, GFP_KERNEL);
++	if (!buf) {
++		return -ENOMEM;
++	}
++
++	if (copy_from_user(buf, buffer, count)) {
++		kfree(buf);
++		return -EFAULT;
++	}
++
++	pid = string_to_number(buf);
++
++	encrypt_process(pid);
++
++	kfree(buf);
++	return count;
++}
++
++static int proc_write_done(struct file *file, const char *buffer,
++                           unsigned long count, void *data)
++{
++	if (count < 1) {
++		return -EINVAL;
++	}
++
++	printk("memencrypt: proc_write_done: ----- pages encrypted: "
++	       "memencrypt_page_count = %lu; size = %lu KB -----\n",
++	       memencrypt_page_count,
++	       ((memencrypt_page_count * PAGE_SIZE) / 1024));
++	printk("memencrypt: proc_write_done: ----- pages decrypted: "
++	       "memdecrypt_page_count = %lu; size = %lu KB -----\n",
++	       memdecrypt_page_count,
++	       ((memdecrypt_page_count * PAGE_SIZE) / 1024));
++
++	return count;
++}
++
++static int proc_read_done(char *page, char **start, off_t off, int count,
++                          int *eof, void *data)
++{
++	*eof = 1;
++
++	return sprintf(page,
++	               "proc pages encrypted: count = %lu; size = %lu KB\n" \
++	               "pages encrypted: count = %lu; size = %lu KB\n" \
++	               "pages decrypted: count = %lu; size = %lu KB\n",
++	               proc_enc_page_count,
++	               ((proc_enc_page_count * PAGE_SIZE) / 1024),
++	               memencrypt_page_count,
++	               ((memencrypt_page_count * PAGE_SIZE) / 1024),
++	               memdecrypt_page_count,
++	               ((memdecrypt_page_count * PAGE_SIZE) / 1024));
++}
++
++static int proc_read_pid(char *page, char **start, off_t off, int count,
++                         int *eof, void *data)
++{
++	*eof = 1;
++	return sprintf(page, "Process: %d\n", pid);
++}
++#endif /* CONFIG_PROC_FS */
++
++
++static int __init memencrypt_init(void)
++{
++#ifdef CONFIG_PROC_FS
++	struct proc_dir_entry *ent;
++
++	base_dir = proc_mkdir("memencrypt", NULL);
++	if (base_dir == NULL) {
++		pr_err("memencrypt: memencrypt_init: unable to create " \
++		       "/proc/memencrypt directory\n");
++		return -ENOMEM;
++	}
++
++	/* Create pid proc entry. */
++	ent = create_proc_entry("pid", S_IRUGO | S_IWUGO, base_dir);
++
++	if (!ent) {
++		return -ENOMEM;
++	}
++
++	ent->read_proc = proc_read_pid;
++	ent->write_proc = proc_write_pid;
++
++	/* Create done proc entry*/
++	ent = create_proc_entry("done", S_IRUGO | S_IWUGO, base_dir);
++
++	if (!ent) {
++		return -ENOMEM;
++	}
++
++	ent->read_proc = proc_read_done;
++	ent->write_proc = proc_write_done;
++
++	pr_info("memencrypt: created proc file\n");
++#endif /* CONFIG_PROC_FS */
++
++	pr_info("memencrypt: init done\n");
++
++	return 0;
++}
++
++early_initcall(memencrypt_init);
+diff --git a/build.sh b/build.sh
+new file mode 100755
+index 0000000..1711f94
+--- /dev/null
++++ b/build.sh
+@@ -0,0 +1,9 @@
++#!/bin/bash
++
++#BASEPATH=/home/pjcolp/Projects/aes
++
++export CROSS_COMPILE=/home/pjcolp/Projects/aes/crosstool/crosstool-ng/install/bin/arm-cortex_a9-linux-gnueabi-
++export TEGRA_KERNEL_OUT=/home/pjcolp/Projects/aes/Linux_for_Tegra/sources/kernel_source.out
++export ARCH=arm
++
++make -j5 O=$TEGRA_KERNEL_OUT EXTRA_AFLAGS="-mfpu=neon -mtune=cortex-a9" INSTALL_MOD_PATH=mods zImage
+diff --git a/drivers/ram2ram/Makefile b/drivers/ram2ram/Makefile
+new file mode 100644
+index 0000000..7658a6c
+--- /dev/null
++++ b/drivers/ram2ram/Makefile
+@@ -0,0 +1 @@
++obj-m := tegra_hsuart.o
+diff --git a/drivers/ram2ram/tegra_hsuart.c b/drivers/ram2ram/tegra_hsuart.c
+new file mode 100644
+index 0000000..e4c281f
+--- /dev/null
++++ b/drivers/ram2ram/tegra_hsuart.c
+@@ -0,0 +1,1770 @@
++/*
++ * drivers/serial/tegra_hsuart.c
++ *
++ * High-speed serial driver for NVIDIA Tegra SoCs
++ *
++ * Copyright (C) 2009-2011 NVIDIA Corporation
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
++ */
++
++#define VERBOSE_DEBUG 1
++
++#include <linux/module.h>
++#include <linux/serial.h>
++#include <linux/serial_core.h>
++#include <linux/platform_device.h>
++#include <linux/io.h>
++#include <linux/dma-mapping.h>
++#include <linux/dmapool.h>
++#include <linux/termios.h>
++#include <linux/irq.h>
++#include <linux/delay.h>
++#include <linux/clk.h>
++#include <linux/string.h>
++#include <linux/pagemap.h>
++#include <linux/serial_reg.h>
++#include <linux/serial_8250.h>
++#include <linux/debugfs.h>
++#include <linux/slab.h>
++#include <linux/workqueue.h>
++#include <linux/tegra_uart.h>
++
++#include <mach/dma.h>
++#include <mach/clk.h>
++
++dma_addr_t our_buffer_pa = NULL;
++char* our_buffer_va = NULL;
++unsigned our_size = 0;
++unsigned curr_our_size = 0;
++
++#define TEGRA_UART_TYPE "TEGRA_UART"
++
++#define TX_EMPTY_STATUS (UART_LSR_TEMT | UART_LSR_THRE)
++
++#define BYTES_TO_ALIGN(x) ((unsigned long)(ALIGN((x), sizeof(u32))) - \
++	(unsigned long)(x))
++
++#define UART_RX_DMA_BUFFER_SIZE    (2048*8)
++
++#define UART_LSR_FIFOE		0x80
++#define UART_LSR_TXFIFO_FULL	0x100
++#define UART_IER_EORD		0x20
++#define UART_MCR_RTS_EN		0x40
++#define UART_MCR_CTS_EN		0x20
++#define UART_LSR_ANY		(UART_LSR_OE | UART_LSR_BI | \
++				UART_LSR_PE | UART_LSR_FE)
++
++#define TX_FORCE_PIO 0
++#define RX_FORCE_PIO 0
++
++const int dma_req_sel[] = {
++	TEGRA_DMA_REQ_SEL_UARTA,
++	TEGRA_DMA_REQ_SEL_UARTB,
++	TEGRA_DMA_REQ_SEL_UARTC,
++	TEGRA_DMA_REQ_SEL_UARTD,
++	TEGRA_DMA_REQ_SEL_UARTE,
++};
++
++#define TEGRA_TX_PIO			1
++#define TEGRA_TX_DMA			2
++
++#define TEGRA_UART_MIN_DMA		16
++#define TEGRA_UART_FIFO_SIZE		8
++
++#define TEGRA_UART_CLOSED    0
++#define TEGRA_UART_OPENED    1
++#define TEGRA_UART_CLOCK_OFF 2
++#define TEGRA_UART_SUSPEND   3
++
++/* Tx fifo trigger level setting in tegra uart is in reverse way than
++ * conventional uart. */
++#define TEGRA_UART_TX_TRIG_16B 0x00
++#define TEGRA_UART_TX_TRIG_8B  0x10
++#define TEGRA_UART_TX_TRIG_4B  0x20
++#define TEGRA_UART_TX_TRIG_1B  0x30
++
++static char * param_va = 0;
++static char * param_pa = 0;
++static char * param_size = 0;
++
++struct tegra_uart_port {
++	struct uart_port	uport;
++	char			port_name[32];
++
++	/* Module info. */
++	unsigned long		size;
++	struct clk		*clk;
++	unsigned int		baud;
++
++	/* Register shadow. */
++	unsigned char		fcr_shadow;
++	unsigned char		mcr_shadow;
++	unsigned char		lcr_shadow;
++	unsigned char		ier_shadow;
++	bool			use_cts_control;
++	bool			rts_active;
++
++	int			tx_in_progress;
++	unsigned int		tx_bytes;
++
++	dma_addr_t		xmit_dma_addr;
++
++	/* TX DMA */
++	struct tegra_dma_req	tx_dma_req;
++	struct tegra_dma_channel *tx_dma;
++
++	/* RX DMA */
++	struct tegra_dma_req	rx_dma_req;
++	struct tegra_dma_channel *rx_dma;
++
++	bool			use_rx_dma;
++	bool			use_tx_dma;
++	int			uart_state;
++	bool			rx_timeout;
++	int			rx_in_progress;
++};
++
++static void tegra_set_baudrate(struct tegra_uart_port *t, unsigned int baud);
++static void do_handle_rx_pio(struct tegra_uart_port *t);
++static void do_handle_rx_dma(struct tegra_uart_port *t);
++static void set_rts(struct tegra_uart_port *t, bool active);
++
++static inline u8 uart_readb(struct tegra_uart_port *t, unsigned long reg)
++{
++	u8 val = readb(t->uport.membase + (reg << t->uport.regshift));
++	dev_vdbg(t->uport.dev, "%s: %p %03lx = %02x\n", __func__,
++		t->uport.membase, reg << t->uport.regshift, val);
++	return val;
++}
++
++static inline u32 uart_readl(struct tegra_uart_port *t, unsigned long reg)
++{
++	u32 val = readl(t->uport.membase + (reg << t->uport.regshift));
++	dev_vdbg(t->uport.dev, "%s: %p %03lx = %02x\n", __func__,
++		t->uport.membase, reg << t->uport.regshift, val);
++	return val;
++}
++
++static inline void uart_writeb(struct tegra_uart_port *t, u8 val,
++                               unsigned long reg)
++{
++	dev_vdbg(t->uport.dev, "%s: %p %03lx %02x\n",
++		__func__, t->uport.membase, reg << t->uport.regshift, val);
++	writeb(val, t->uport.membase + (reg << t->uport.regshift));
++}
++
++static inline void uart_writel(struct tegra_uart_port *t, u32 val,
++                               unsigned long reg)
++{
++	dev_vdbg(t->uport.dev, "%s: %p %03lx %08x\n",
++		__func__, t->uport.membase, reg << t->uport.regshift, val);
++	writel(val, t->uport.membase + (reg << t->uport.regshift));
++}
++
++static void fill_tx_fifo(struct tegra_uart_port *t, int max_bytes)
++{
++	int i;
++	struct circ_buf *xmit = &t->uport.state->xmit;
++#ifndef CONFIG_ARCH_TEGRA_2x_SOC
++	unsigned long lsr;
++#endif
++
++	for (i = 0; i < max_bytes; i++) {
++		BUG_ON(uart_circ_empty(xmit));
++#ifndef CONFIG_ARCH_TEGRA_2x_SOC
++		lsr = uart_readl(t, UART_LSR);
++		if ((lsr & UART_LSR_TXFIFO_FULL))
++			break;
++#endif
++		uart_writeb(t, xmit->buf[xmit->tail], UART_TX);
++		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
++		t->uport.icount.tx++;
++	}
++}
++
++static void tegra_start_pio_tx(struct tegra_uart_port *t, unsigned int bytes)
++{
++	printk("<1>In tegra_start_pio_tx\n");
++	if (bytes > TEGRA_UART_FIFO_SIZE)
++		bytes = TEGRA_UART_FIFO_SIZE;
++
++	t->fcr_shadow &= ~UART_FCR_T_TRIG_11;
++	t->fcr_shadow |= TEGRA_UART_TX_TRIG_8B;
++	uart_writeb(t, t->fcr_shadow, UART_FCR);
++	t->tx_in_progress = TEGRA_TX_PIO;
++	t->tx_bytes = bytes;
++	t->ier_shadow |= UART_IER_THRI;
++	uart_writeb(t, t->ier_shadow, UART_IER);
++}
++
++static void tegra_start_dma_tx(struct tegra_uart_port *t, unsigned long bytes)
++{
++	struct circ_buf *xmit;
++	xmit = &t->uport.state->xmit;
++
++	printk("[tegra_hsuart] In start DMA TX\n");
++
++	printk("Our buffer: 0x%x\t0x%x\n", our_buffer_va, our_buffer_pa);
++	printk("First byte in our_buffer_va is %c\n", *our_buffer_va);
++
++	t->fcr_shadow &= ~UART_FCR_T_TRIG_11;
++	t->fcr_shadow |= TEGRA_UART_TX_TRIG_4B;
++	uart_writeb(t, t->fcr_shadow, UART_FCR);
++
++	t->tx_bytes = bytes & ~(sizeof(u32)-1);
++	t->tx_dma_req.source_addr = our_buffer_pa + curr_our_size;
++	t->tx_dma_req.size = t->tx_bytes;
++	curr_our_size += t->tx_bytes;
++	if (curr_our_size > our_size) {
++		printk("<1>End of buffer reached\n");
++		t->tx_dma_req.source_addr = our_buffer_pa + our_size - t->tx_bytes;
++		curr_our_size = 0;
++	}
++
++	t->tx_in_progress = TEGRA_TX_DMA;
++
++	*our_buffer_va = 'X';
++	tegra_dma_enqueue_req(t->tx_dma, &t->tx_dma_req);
++
++	printk("[tegra_hsuart] Out of start DMA TX %d\n", t->tx_dma_req.size);
++}
++
++/* Called with u->lock taken. */
++static void tegra_start_next_tx(struct tegra_uart_port *t)
++{
++	unsigned long tail;
++	unsigned long count;
++
++	struct circ_buf *xmit;
++
++	xmit = &t->uport.state->xmit;
++	tail = (unsigned long)&xmit->buf[xmit->tail];
++	count = CIRC_CNT_TO_END(xmit->head, xmit->tail, UART_XMIT_SIZE);
++
++	dev_vdbg(t->uport.dev, "+%s %lu %d\n", __func__, count,
++	         t->tx_in_progress);
++
++	printk("[tegra_hsuart] In tegra_start_next_tx %d\t%d\n", count,
++	       BYTES_TO_ALIGN(tail));
++	if (count == 0)
++		goto out;
++
++	if (!t->use_tx_dma || count < TEGRA_UART_MIN_DMA)
++		tegra_start_pio_tx(t, count);
++	else if (BYTES_TO_ALIGN(tail) > 0)
++		tegra_start_pio_tx(t, BYTES_TO_ALIGN(tail));
++	else
++		tegra_start_dma_tx(t, count);
++
++out:
++	dev_vdbg(t->uport.dev, "-%s", __func__);
++}
++
++/* Called by serial core driver with u->lock taken. */
++static void tegra_start_tx(struct uart_port *u)
++{
++	struct tegra_uart_port *t;
++	struct circ_buf *xmit;
++
++	printk("[tegra_hsuart] tegra_start_tx\n");
++
++	t = container_of(u, struct tegra_uart_port, uport);
++	xmit = &u->state->xmit;
++
++	if (!uart_circ_empty(xmit) && !t->tx_in_progress)
++		tegra_start_next_tx(t);
++}
++
++static int tegra_start_dma_rx(struct tegra_uart_port *t)
++{
++	wmb();
++	dma_sync_single_for_device(t->uport.dev, t->rx_dma_req.dest_addr,
++			t->rx_dma_req.size, DMA_TO_DEVICE);
++	if (tegra_dma_enqueue_req(t->rx_dma, &t->rx_dma_req)) {
++		dev_err(t->uport.dev, "Could not enqueue Rx DMA req\n");
++		return -EINVAL;
++	}
++	printk("[tegra_hsuart] In Start DMA RX %d\n", t->rx_dma_req.size);
++	return 0;
++}
++
++static void tegra_rx_dma_threshold_callback(struct tegra_dma_req *req)
++{
++	struct tegra_uart_port *t = req->dev;
++	struct uart_port *u = &t->uport;
++	unsigned long flags;
++
++	spin_lock_irqsave(&u->lock, flags);
++
++	do_handle_rx_dma(t);
++
++	spin_unlock_irqrestore(&u->lock, flags);
++}
++
++/*
++ * It is expected that the callers take the UART lock when this API is called.
++ *
++ * There are 2 contexts when this function is called:
++ *
++ * 1. DMA ISR - DMA ISR triggers the threshold complete calback, which calls the
++ * dequue API which in-turn calls this callback. UART lock is taken during
++ * the call to the threshold callback.
++ *
++ * 2. UART ISR - UART calls the dequue API which in-turn will call this API.
++ * In this case, UART ISR takes the UART lock.
++ */
++static void tegra_rx_dma_complete_callback(struct tegra_dma_req *req)
++{
++	struct tegra_uart_port *t = req->dev;
++	struct uart_port *u = &t->uport;
++	struct tty_struct *tty = u->state->port.tty;
++	int copied;
++
++	/* If we are here, DMA is stopped. */
++	printk("In rx_dma_complete_callback\n");
++
++	dev_dbg(t->uport.dev, "%s: %d %d\n", __func__, req->bytes_transferred,
++		req->status);
++	if (req->bytes_transferred) {
++		t->uport.icount.rx += req->bytes_transferred;
++		dma_sync_single_for_cpu(t->uport.dev, req->dest_addr,
++				req->size, DMA_FROM_DEVICE);
++		copied = tty_insert_flip_string(tty,
++			((unsigned char *)(req->virt_addr)),
++			req->bytes_transferred);
++		if (copied != req->bytes_transferred) {
++			WARN_ON(1);
++			dev_err(t->uport.dev, "Not able to copy uart data "
++				"to tty layer Req %d and coped %d\n",
++				req->bytes_transferred, copied);
++		}
++		dma_sync_single_for_device(t->uport.dev, req->dest_addr,
++				req->size, DMA_TO_DEVICE);
++	}
++
++	do_handle_rx_pio(t);
++
++	/* Push the read data later in caller place. */
++	if (req->status == -TEGRA_DMA_REQ_ERROR_ABORTED)
++		return;
++
++	spin_unlock(&u->lock);
++	tty_flip_buffer_push(u->state->port.tty);
++	spin_lock(&u->lock);
++	printk("Out rx_dma_complete_callback\n");
++}
++
++/* Lock already taken. */
++static void do_handle_rx_dma(struct tegra_uart_port *t)
++{
++	struct uart_port *u = &t->uport;
++	if (t->rts_active)
++		set_rts(t, false);
++	tegra_dma_dequeue_req(t->rx_dma, &t->rx_dma_req);
++	tty_flip_buffer_push(u->state->port.tty);
++	/* enqueue the request again */
++	tegra_start_dma_rx(t);
++	if (t->rts_active)
++		set_rts(t, true);
++}
++
++/* Wait for a symbol-time. */
++static void wait_sym_time(struct tegra_uart_port *t, unsigned int syms)
++{
++	/* Definitely have a start bit. */
++	unsigned int bits = 1;
++	switch (t->lcr_shadow & 3) {
++	case UART_LCR_WLEN5:
++		bits += 5;
++		break;
++	case UART_LCR_WLEN6:
++		bits += 6;
++		break;
++	case UART_LCR_WLEN7:
++		bits += 7;
++		break;
++	default:
++		bits += 8;
++		break;
++	}
++
++	/* Technically 5 bits gets 1.5 bits of stop... */
++	if (t->lcr_shadow & UART_LCR_STOP)
++		bits += 2;
++	else
++		bits++;
++
++	if (t->lcr_shadow & UART_LCR_PARITY)
++		bits++;
++
++	if (likely(t->baud))
++		udelay(DIV_ROUND_UP(syms * bits * 1000000, t->baud));
++}
++
++/* Flush desired FIFO. */
++static void tegra_fifo_reset(struct tegra_uart_port *t, u8 fcr_bits)
++{
++	unsigned char fcr = t->fcr_shadow;
++#ifdef CONFIG_ARCH_TEGRA_2x_SOC
++	fcr |= fcr_bits & (UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT);
++	uart_writeb(t, fcr, UART_FCR);
++#else
++	/* HW issue: Resetting tx fifo with non-fifo mode to avoid any extra
++	 * character to be sent. */
++	fcr &= ~UART_FCR_ENABLE_FIFO;
++	uart_writeb(t, fcr, UART_FCR);
++	udelay(60);
++	fcr |= fcr_bits & (UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT);
++	uart_writeb(t, fcr, UART_FCR);
++	fcr |= UART_FCR_ENABLE_FIFO;
++	uart_writeb(t, fcr, UART_FCR);
++#endif
++	uart_readb(t, UART_SCR); /* Dummy read to ensure the write is posted. */
++	wait_sym_time(t, 1); /* Wait for the flush to propagate. */
++}
++
++static char do_decode_rx_error(struct tegra_uart_port *t, u8 lsr)
++{
++	char flag = TTY_NORMAL;
++
++	if (unlikely(lsr & UART_LSR_ANY)) {
++		if (lsr & UART_LSR_OE) {
++			/* Overrrun error. */
++			flag |= TTY_OVERRUN;
++			t->uport.icount.overrun++;
++			dev_err(t->uport.dev, "Got overrun errors\n");
++		} else if (lsr & UART_LSR_PE) {
++			/* Parity error */
++			flag |= TTY_PARITY;
++			t->uport.icount.parity++;
++			dev_err(t->uport.dev, "Got Parity errors\n");
++		} else if (lsr & UART_LSR_FE) {
++			flag |= TTY_FRAME;
++			t->uport.icount.frame++;
++			dev_err(t->uport.dev, "Got frame errors\n");
++		} else if (lsr & UART_LSR_BI) {
++			dev_err(t->uport.dev, "Got Break\n");
++			t->uport.icount.brk++;
++			/* If FIFO read error without any data, reset Rx FIFO. */
++			if (!(lsr & UART_LSR_DR) && (lsr & UART_LSR_FIFOE))
++				tegra_fifo_reset(t, UART_FCR_CLEAR_RCVR);
++		}
++	}
++	return flag;
++}
++
++static void do_handle_rx_pio(struct tegra_uart_port *t)
++{
++	int count = 0;
++	do {
++		char flag = TTY_NORMAL;
++		unsigned char lsr = 0;
++		unsigned char ch;
++
++		lsr = uart_readb(t, UART_LSR);
++		if (!(lsr & UART_LSR_DR))
++			break;
++
++		flag =  do_decode_rx_error(t, lsr);
++		ch = uart_readb(t, UART_RX);
++		t->uport.icount.rx++;
++		count++;
++
++		if (!uart_handle_sysrq_char(&t->uport, c))
++			uart_insert_char(&t->uport, lsr, UART_LSR_OE, ch, flag);
++	} while (1);
++
++	dev_dbg(t->uport.dev, "PIO received %d bytes\n", count);
++	return;
++}
++
++static void do_handle_modem_signal(struct uart_port *u)
++{
++	unsigned char msr;
++	struct tegra_uart_port *t;
++
++	t = container_of(u, struct tegra_uart_port, uport);
++	msr = uart_readb(t, UART_MSR);
++	if (msr & UART_MSR_CTS)
++		dev_dbg(u->dev, "CTS triggered\n");
++	if (msr & UART_MSR_DSR)
++		dev_dbg(u->dev, "DSR enabled\n");
++	if (msr & UART_MSR_DCD)
++		dev_dbg(u->dev, "CD enabled\n");
++	if (msr & UART_MSR_RI)
++		dev_dbg(u->dev, "RI enabled\n");
++	return;
++}
++
++static void do_handle_tx_pio(struct tegra_uart_port *t)
++{
++	struct circ_buf *xmit = &t->uport.state->xmit;
++
++	fill_tx_fifo(t, t->tx_bytes);
++
++	t->tx_in_progress = 0;
++
++	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
++		uart_write_wakeup(&t->uport);
++
++	tegra_start_next_tx(t);
++	return;
++}
++
++static void tegra_tx_dma_complete_callback(struct tegra_dma_req *req)
++{
++	struct tegra_uart_port *t = req->dev;
++	struct circ_buf *xmit = &t->uport.state->xmit;
++	int count = req->bytes_transferred;
++	unsigned long flags;
++
++	printk("<1>In tx_dma_complete_callback\n");
++
++	dev_vdbg(t->uport.dev, "%s: %d\n", __func__, count);
++
++	/* Update xmit pointers without lock if dma aborted. */
++	if (req->status == -TEGRA_DMA_REQ_ERROR_ABORTED) {
++		xmit->tail = (xmit->tail + count) & (UART_XMIT_SIZE - 1);
++		t->tx_in_progress = 0;
++		return;
++	}
++
++	spin_lock_irqsave(&t->uport.lock, flags);
++	xmit->tail = (xmit->tail + count) & (UART_XMIT_SIZE - 1);
++	t->tx_in_progress = 0;
++
++	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
++		uart_write_wakeup(&t->uport);
++
++	tegra_start_next_tx(t);
++
++	spin_unlock_irqrestore(&t->uport.lock, flags);
++	printk("<1> out tx_dma_complete_callback\n");
++}
++
++static irqreturn_t tegra_uart_isr(int irq, void *data)
++{
++	struct tegra_uart_port *t = data;
++	struct uart_port *u = &t->uport;
++	unsigned char iir;
++	unsigned char ier;
++	bool is_rx_int = false;
++	unsigned long flags;
++	printk("<1>In tegra_uart_isr\n");
++	
++	spin_lock_irqsave(&u->lock, flags);
++	t  = container_of(u, struct tegra_uart_port, uport);
++	while (1) {
++		iir = uart_readb(t, UART_IIR);
++		if (iir & UART_IIR_NO_INT) {
++			if (likely(t->use_rx_dma) && is_rx_int) {
++				do_handle_rx_dma(t);
++
++				if (t->rx_in_progress) {
++					ier = t->ier_shadow;
++					ier |= (UART_IER_RLSI | UART_IER_RTOIE |
++								UART_IER_EORD);
++					t->ier_shadow = ier;
++					uart_writeb(t, ier, UART_IER);
++				}
++			}
++			spin_unlock_irqrestore(&u->lock, flags);
++			return IRQ_HANDLED;
++		}
++
++		dev_dbg(u->dev, "tegra_uart_isr iir = 0x%x (%d)\n", iir,
++			(iir >> 1) & 0x7);
++		switch ((iir >> 1) & 0x7) {
++		case 0: /* Modem signal change interrupt. */
++			do_handle_modem_signal(u);
++			break;
++		case 1: /* Transmit interrupt only triggered when using PIO. */
++			t->ier_shadow &= ~UART_IER_THRI;
++			uart_writeb(t, t->ier_shadow, UART_IER);
++			do_handle_tx_pio(t);
++			break;
++		case 4: /* End of data. */
++		case 6: /* Rx timeout. */
++		case 2: /* Receive. */
++			if (likely(t->use_rx_dma)) {
++				if (!is_rx_int) {
++					is_rx_int = true;
++					/* Disable interrupts. */
++					ier = t->ier_shadow;
++					ier |= UART_IER_RDI;
++					uart_writeb(t, ier, UART_IER);
++					ier &= ~(UART_IER_RDI | UART_IER_RLSI |
++						UART_IER_RTOIE | UART_IER_EORD);
++					t->ier_shadow = ier;
++					uart_writeb(t, ier, UART_IER);
++				}
++			} else {
++				do_handle_rx_pio(t);
++
++				spin_unlock_irqrestore(&u->lock, flags);
++				tty_flip_buffer_push(u->state->port.tty);
++				spin_lock_irqsave(&u->lock, flags);
++			}
++			break;
++		case 3: /* Receive error. */
++			/* FIXME: How to handle this? Why do we get here? */
++			do_decode_rx_error(t, uart_readb(t, UART_LSR));
++			break;
++		case 5: /* break nothing to handle. */
++		case 7: /* break nothing to handle. */
++			break;
++		}
++	}
++}
++
++static void tegra_stop_rx(struct uart_port *u)
++{
++	struct tegra_uart_port *t;
++	unsigned char ier;
++
++	t = container_of(u, struct tegra_uart_port, uport);
++
++	if (t->rts_active)
++		set_rts(t, false);
++
++	if (t->rx_in_progress) {
++		wait_sym_time(t, 1); /* wait a character interval. */
++
++		ier = t->ier_shadow;
++		ier &= ~(UART_IER_RDI | UART_IER_RLSI | UART_IER_RTOIE |
++					UART_IER_EORD);
++		t->ier_shadow = ier;
++		uart_writeb(t, ier, UART_IER);
++		t->rx_in_progress = 0;
++
++		if (t->use_rx_dma && t->rx_dma)
++			tegra_dma_dequeue_req(t->rx_dma, &t->rx_dma_req);
++		else
++			do_handle_rx_pio(t);
++
++		tty_flip_buffer_push(u->state->port.tty);
++	}
++
++	return;
++}
++
++static void tegra_uart_hw_deinit(struct tegra_uart_port *t)
++{
++	unsigned long flags;
++	unsigned long char_time = DIV_ROUND_UP(10000000, t->baud);
++	unsigned long fifo_empty_time = t->uport.fifosize * char_time;
++	unsigned long wait_time;
++	unsigned char lsr;
++	unsigned char msr;
++	unsigned char mcr;
++
++	/* Disable interrupts. */
++	uart_writeb(t, 0, UART_IER);
++
++	lsr = uart_readb(t, UART_LSR);
++	if ((lsr & UART_LSR_TEMT) != UART_LSR_TEMT) {
++		msr = uart_readb(t, UART_MSR);
++		mcr = uart_readb(t, UART_MCR);
++		if ((mcr & UART_MCR_CTS_EN) && (msr & UART_MSR_CTS))
++			dev_err(t->uport.dev, "%s: Tx fifo not empty and "
++				"slave disabled CTS, Waiting for slave to"
++				" be ready\n", __func__);
++
++		/* Wait for Tx fifo to be empty. */
++		while ((lsr & UART_LSR_TEMT) != UART_LSR_TEMT) {
++			wait_time = min(fifo_empty_time, 100lu);
++			udelay(wait_time);
++			fifo_empty_time -= wait_time;
++			if (!fifo_empty_time) {
++				msr = uart_readb(t, UART_MSR);
++				mcr = uart_readb(t, UART_MCR);
++				if ((mcr & UART_MCR_CTS_EN) &&
++					(msr & UART_MSR_CTS))
++					dev_err(t->uport.dev, "%s: Slave is "
++					"still not ready!\n", __func__);
++				break;
++			}
++			lsr = uart_readb(t, UART_LSR);
++		}
++	}
++
++	spin_lock_irqsave(&t->uport.lock, flags);
++
++	/* Reset the Rx and Tx FIFOs. */
++	tegra_fifo_reset(t, UART_FCR_CLEAR_XMIT | UART_FCR_CLEAR_RCVR);
++
++	t->baud = 0;
++	t->uart_state = TEGRA_UART_CLOSED;
++
++	spin_unlock_irqrestore(&t->uport.lock, flags);
++
++	clk_disable(t->clk);
++}
++
++static void tegra_uart_free_rx_dma_buffer(struct tegra_uart_port *t)
++{
++	if (likely(t->rx_dma_req.dest_addr))
++		dma_free_coherent(t->uport.dev, t->rx_dma_req.size,
++			t->rx_dma_req.virt_addr, t->rx_dma_req.dest_addr);
++	t->rx_dma_req.dest_addr = 0;
++	t->rx_dma_req.virt_addr = NULL;
++}
++
++static void tegra_uart_free_rx_dma(struct tegra_uart_port *t)
++{
++	if (!t->use_rx_dma)
++		return;
++
++	tegra_dma_free_channel(t->rx_dma);
++	t->rx_dma = NULL;
++	t->use_rx_dma = false;
++}
++
++static int tegra_uart_hw_init(struct tegra_uart_port *t)
++{
++	unsigned char ier;
++
++	dev_vdbg(t->uport.dev, "+tegra_uart_hw_init\n");
++
++	t->fcr_shadow = 0;
++	t->mcr_shadow = 0;
++	t->lcr_shadow = 0;
++	t->ier_shadow = 0;
++	t->baud = 0;
++
++	clk_enable(t->clk);
++
++	/* Reset the UART controller to clear all previous status. */
++	tegra_periph_reset_assert(t->clk);
++	udelay(100);
++	tegra_periph_reset_deassert(t->clk);
++	udelay(100);
++
++	t->rx_in_progress = 0;
++
++	/*
++	 * Set the trigger level
++	 *
++	 * For PIO mode:
++	 *
++	 * For receive, this will interrupt the CPU after that many number of
++	 * bytes are received, for the remaining bytes the receive timeout
++	 * interrupt is received.
++	 *
++	 *  Rx high watermark is set to 4.
++	 *
++	 * For transmit, if the transmit interrupt is enabled, this will
++	 * interrupt the CPU when the number of entries in the FIFO reaches the
++	 * low watermark.
++	 *
++	 *  Tx low watermark is set to 8.
++	 *
++	 *  For DMA mode:
++	 *
++	 *  Set the Tx trigger to 4. This should match the DMA burst size that
++	 *  programmed in the DMA registers.
++	 */
++	t->fcr_shadow = UART_FCR_ENABLE_FIFO;
++	t->fcr_shadow |= UART_FCR_R_TRIG_01;
++	t->fcr_shadow |= TEGRA_UART_TX_TRIG_8B;
++	uart_writeb(t, t->fcr_shadow, UART_FCR);
++
++	if (t->use_rx_dma) {
++		/*
++		 * Initialize the UART for a simple default configuration
++		 * so that the receive DMA buffer may be enqueued. */
++		t->lcr_shadow = 3;  /* no parity, stop, 8 data bits. */
++		tegra_set_baudrate(t, 115200);
++		t->fcr_shadow |= UART_FCR_DMA_SELECT;
++		uart_writeb(t, t->fcr_shadow, UART_FCR);
++		if (tegra_start_dma_rx(t)) {
++			dev_err(t->uport.dev, "Rx DMA enqueue failed\n");
++			tegra_uart_free_rx_dma(t);
++			t->fcr_shadow &= ~UART_FCR_DMA_SELECT;
++			uart_writeb(t, t->fcr_shadow, UART_FCR);
++		}
++	} else {
++		uart_writeb(t, t->fcr_shadow, UART_FCR);
++	}
++
++	t->rx_in_progress = 1;
++
++	/*
++	 *  Enable IE_RXS for the receive status interrupts like line erros.
++	 *  Enable IE_RX_TIMEOUT to get the bytes which cannot be DMA'd.
++	 *
++	 *  If using DMA mode, enable EORD instead of receive interrupt which
++	 *  will interrupt after the UART is done with the receive instead of
++	 *  the interrupt when the FIFO "threshold" is reached.
++	 *
++	 *  EORD is different interrupt than RX_TIMEOUT - RX_TIMEOUT occurs when
++	 *  the DATA is sitting in the FIFO and couldn't be transferred to the
++	 *  DMA as the DMA size alignment(4 bytes) is not met. EORD will be
++	 *  triggered when there is a pause of the incoming data stream for 4
++	 *  characters long.
++	 *
++	 *  For pauses in the data which is not aligned to 4 bytes, we get
++	 *  both the EORD as well as RX_TIMEOUT - SW sees RX_TIMEOUT first
++	 *  then the EORD.
++	 *
++	 *  Don't get confused, believe in the magic of nvidia hw...:-)
++	 */
++	ier = 0;
++	ier |= UART_IER_RLSI | UART_IER_RTOIE;
++	if (t->use_rx_dma)
++		ier |= UART_IER_EORD;
++	else
++		ier |= UART_IER_RDI;
++	t->ier_shadow = ier;
++	uart_writeb(t, ier, UART_IER);
++
++	t->uart_state = TEGRA_UART_OPENED;
++	dev_vdbg(t->uport.dev, "-tegra_uart_hw_init\n");
++	return 0;
++}
++
++static int tegra_uart_init_rx_dma_buffer(struct tegra_uart_port *t)
++{
++	dma_addr_t rx_dma_phys;
++	void *rx_dma_virt;
++
++	t->rx_dma_req.size = UART_RX_DMA_BUFFER_SIZE;
++	rx_dma_virt = dma_alloc_coherent(t->uport.dev,
++		t->rx_dma_req.size, &rx_dma_phys, GFP_KERNEL);
++
++	if (!rx_dma_virt) {
++		dev_err(t->uport.dev, "DMA buffers allocate failed\n");
++		return -ENOMEM;
++	}
++	t->rx_dma_req.dest_addr = rx_dma_phys;
++	t->rx_dma_req.virt_addr = rx_dma_virt;
++
++	t->rx_dma_req.source_addr = (unsigned long)t->uport.mapbase;
++	t->rx_dma_req.source_wrap = 4;
++	t->rx_dma_req.dest_wrap = 0;
++	t->rx_dma_req.to_memory = 1;
++	t->rx_dma_req.source_bus_width = 8;
++	t->rx_dma_req.dest_bus_width = 32;
++	t->rx_dma_req.req_sel = dma_req_sel[t->uport.line];
++	t->rx_dma_req.complete = tegra_rx_dma_complete_callback;
++	t->rx_dma_req.threshold = tegra_rx_dma_threshold_callback;
++	t->rx_dma_req.dev = t;
++
++	return 0;
++}
++
++static int tegra_uart_init_rx_dma(struct tegra_uart_port *t)
++{
++	t->rx_dma = tegra_dma_allocate_channel(TEGRA_DMA_MODE_CONTINUOUS,
++					"uart_rx_%d", t->uport.line);
++	if (!t->rx_dma) {
++		dev_err(t->uport.dev, "%s: failed to allocate RX DMA.\n",
++				__func__);
++		return -ENODEV;
++	}
++	return 0;
++}
++
++static int tegra_startup(struct uart_port *u)
++{
++	struct tegra_uart_port *t = container_of(u,
++		struct tegra_uart_port, uport);
++	int ret = 0;
++	struct tegra_uart_platform_data *pdata;
++
++	t = container_of(u, struct tegra_uart_port, uport);
++	sprintf(t->port_name, "tegra_uart_%d", u->line);
++
++	t->use_tx_dma = false;
++	if (!TX_FORCE_PIO) {
++		t->tx_dma = tegra_dma_allocate_channel(TEGRA_DMA_MODE_ONESHOT,
++					"uart_tx_%d", u->line);
++		if (t->tx_dma)
++			t->use_tx_dma = true;
++		else
++			pr_err("%s: failed to allocate TX DMA.\n", __func__);
++	}
++	if (t->use_tx_dma) {
++		t->tx_dma_req.instance = u->line;
++		t->tx_dma_req.complete = tegra_tx_dma_complete_callback;
++		t->tx_dma_req.to_memory = 0;
++
++		t->tx_dma_req.dest_addr = (unsigned long)t->uport.mapbase;
++		t->tx_dma_req.dest_wrap = 4;
++		t->tx_dma_req.source_wrap = 0;
++		t->tx_dma_req.source_bus_width = 32;
++		t->tx_dma_req.dest_bus_width = 8;
++		t->tx_dma_req.req_sel = dma_req_sel[t->uport.line];
++		t->tx_dma_req.dev = t;
++		t->tx_dma_req.size = 0;
++
++		printk("[tegra_hsuart] VA: 0x%x\tPA: 0x%x\n", our_buffer_va, our_buffer_pa);
++		printk("[tegra_hsuart] VA: 0x%x\tPA: 0x%x\n", our_buffer_va, our_buffer_pa);
++	}
++	t->tx_in_progress = 0;
++
++	t->use_rx_dma = false;
++	if (!RX_FORCE_PIO && t->rx_dma_req.virt_addr) {
++		if (!tegra_uart_init_rx_dma(t))
++			t->use_rx_dma = true;
++	}
++
++	ret = tegra_uart_hw_init(t);
++	if (ret)
++		goto fail;
++
++	pdata = u->dev->platform_data;
++	if (pdata && pdata->is_loopback)
++		t->mcr_shadow |= UART_MCR_LOOP;
++
++	dev_dbg(u->dev, "Requesting IRQ %d\n", u->irq);
++	ret = request_irq(u->irq, tegra_uart_isr, IRQF_DISABLED,
++				t->port_name, t);
++	if (ret) {
++		dev_err(u->dev, "Failed to register ISR for IRQ %d\n", u->irq);
++		goto fail;
++	}
++
++	dev_dbg(u->dev, "Started UART port %d\n", u->line);
++	return 0;
++fail:
++	dev_err(u->dev, "Tegra UART startup failed\n");
++	return ret;
++}
++
++static void tegra_shutdown(struct uart_port *u)
++{
++	struct tegra_uart_port *t;
++
++	printk("<1>In tegra_shutdown\n");
++	t = container_of(u, struct tegra_uart_port, uport);
++	dev_vdbg(u->dev, "+tegra_shutdown\n");
++
++	tegra_uart_hw_deinit(t);
++
++	t->rx_in_progress = 0;
++	t->tx_in_progress = 0;
++
++	tegra_uart_free_rx_dma(t);
++	if (t->use_tx_dma) {
++		tegra_dma_free_channel(t->tx_dma);
++		t->tx_dma = NULL;
++		t->use_tx_dma = false;
++		dma_unmap_single(t->uport.dev, our_buffer_pa, UART_XMIT_SIZE,
++				DMA_TO_DEVICE);
++		t->xmit_dma_addr = 0;
++	}
++
++	free_irq(u->irq, t);
++	dev_vdbg(u->dev, "-tegra_shutdown\n");
++}
++
++static void tegra_wake_peer(struct uart_port *u)
++{
++	struct tegra_uart_platform_data *pdata = u->dev->platform_data;
++
++	if (pdata && pdata->wake_peer)
++		pdata->wake_peer(u);
++}
++
++static unsigned int tegra_get_mctrl(struct uart_port *u)
++{
++	/*
++	 * RI - Ring detector is active
++	 * CD/DCD/CAR - Carrier detect is always active. For some reason
++	 *			  linux has different names for carrier detect.
++	 * DSR - Data Set ready is active as the hardware doesn't support it.
++	 *	   Don't know if the linux support this yet?
++	 * CTS - Clear to send. Always set to active, as the hardware handles
++	 *	   CTS automatically.
++	 */
++	return TIOCM_RI | TIOCM_CD | TIOCM_DSR | TIOCM_CTS;
++}
++
++static void set_rts(struct tegra_uart_port *t, bool active)
++{
++	unsigned char mcr;
++	mcr = t->mcr_shadow;
++	if (active)
++		mcr |= UART_MCR_RTS_EN;
++	else
++		mcr &= ~UART_MCR_RTS_EN;
++	if (mcr != t->mcr_shadow) {
++		uart_writeb(t, mcr, UART_MCR);
++		t->mcr_shadow = mcr;
++	}
++	return;
++}
++
++static void set_dtr(struct tegra_uart_port *t, bool active)
++{
++	unsigned char mcr;
++	mcr = t->mcr_shadow;
++	if (active)
++		mcr |= UART_MCR_DTR;
++	else
++		mcr &= ~UART_MCR_DTR;
++	if (mcr != t->mcr_shadow) {
++		uart_writeb(t, mcr, UART_MCR);
++		t->mcr_shadow = mcr;
++	}
++	return;
++}
++
++static void tegra_set_mctrl(struct uart_port *u, unsigned int mctrl)
++{
++	unsigned char mcr;
++	struct tegra_uart_port *t;
++
++	dev_dbg(u->dev, "tegra_set_mctrl called with %d\n", mctrl);
++	t = container_of(u, struct tegra_uart_port, uport);
++
++	mcr = t->mcr_shadow;
++	if (mctrl & TIOCM_RTS) {
++		t->rts_active = true;
++		set_rts(t, true);
++	} else {
++		t->rts_active = false;
++		set_rts(t, false);
++	}
++
++	if (mctrl & TIOCM_DTR)
++		set_dtr(t, true);
++	else
++		set_dtr(t, false);
++	return;
++}
++
++static void tegra_break_ctl(struct uart_port *u, int break_ctl)
++{
++	struct tegra_uart_port *t;
++	unsigned char lcr;
++
++	t = container_of(u, struct tegra_uart_port, uport);
++	lcr = t->lcr_shadow;
++	if (break_ctl)
++		lcr |= UART_LCR_SBC;
++	else
++		lcr &= ~UART_LCR_SBC;
++	uart_writeb(t, lcr, UART_LCR);
++	t->lcr_shadow = lcr;
++}
++
++static int tegra_request_port(struct uart_port *u)
++{
++	return 0;
++}
++
++static void tegra_release_port(struct uart_port *u)
++{
++	/* Nothing to do here. */
++}
++
++static unsigned int tegra_tx_empty(struct uart_port *u)
++{
++	struct tegra_uart_port *t;
++	unsigned int ret = 0;
++	unsigned long flags;
++	unsigned char lsr;
++	printk("<1>In tegra_tx_empty\n");
++
++	t = container_of(u, struct tegra_uart_port, uport);
++	dev_vdbg(u->dev, "+tegra_tx_empty\n");
++
++	spin_lock_irqsave(&u->lock, flags);
++	if (!t->tx_in_progress) {
++		lsr = uart_readb(t, UART_LSR);
++		if ((lsr & TX_EMPTY_STATUS) == TX_EMPTY_STATUS)
++			ret = TIOCSER_TEMT;
++	}
++	spin_unlock_irqrestore(&u->lock, flags);
++
++	dev_vdbg(u->dev, "-tegra_tx_empty\n");
++	printk("<1>Out tegra_tx_empty\n");
++	return ret;
++}
++
++static void tegra_stop_tx(struct uart_port *u)
++{
++	struct tegra_uart_port *t;
++	printk("<1>In tegra_stop_tx\n");
++
++	t = container_of(u, struct tegra_uart_port, uport);
++
++	if (t->use_tx_dma)
++		tegra_dma_dequeue_req(t->tx_dma, &t->tx_dma_req);
++
++	return;
++}
++
++static void tegra_enable_ms(struct uart_port *u)
++{
++}
++
++#ifndef CONFIG_ARCH_TEGRA_2x_SOC
++static int clk_div71_get_divider(unsigned long parent_rate,
++		unsigned long rate)
++{
++	s64 divider_u71 = parent_rate;
++	if (!rate)
++		return -EINVAL;
++
++	divider_u71 *= 2;
++	divider_u71 += rate - 1;
++	do_div(divider_u71, rate);
++
++	if ((divider_u71 - 2) < 0)
++		return 0;
++
++	if ((divider_u71 - 2) > 255)
++		return -EINVAL;
++
++	return divider_u71 - 2;
++}
++#endif
++
++static int clk_div16_get_divider(unsigned long parent_rate, unsigned long rate)
++{
++	s64 divider_u16;
++
++	divider_u16 = parent_rate;
++	if (!rate)
++		return -EINVAL;
++	divider_u16 += rate - 1;
++	do_div(divider_u16, rate);
++
++	if (divider_u16 > 0xFFFF)
++		return -EINVAL;
++
++	return divider_u16;
++}
++
++static unsigned long find_best_clock_source(struct tegra_uart_port *t,
++                                            unsigned long rate)
++{
++	struct uart_port *u = &t->uport;
++	struct tegra_uart_platform_data *pdata;
++	int i;
++	int divider;
++	unsigned long parent_rate;
++	unsigned long new_rate;
++	unsigned long err_rate;
++	unsigned int fin_err = rate;
++	unsigned long fin_rate = rate;
++	int final_index = -1;
++	int count;
++	unsigned long error_2perc;
++
++	pdata = u->dev->platform_data;
++	if (!pdata || !pdata->parent_clk_count)
++		return fin_rate;
++
++	error_2perc = (rate / 50);
++
++	for (count = 0; count < pdata->parent_clk_count; ++count) {
++		parent_rate = pdata->parent_clk_list[count].fixed_clk_rate;
++
++		if (parent_rate < rate)
++			continue;
++
++#ifndef CONFIG_ARCH_TEGRA_2x_SOC
++		divider = clk_div71_get_divider(parent_rate, rate);
++
++		/* Get the best divider around calculated value */
++		if (divider > 2) {
++			for (i = divider - 2; i < (divider + 2); ++i) {
++				new_rate = ((parent_rate << 1) + i + 1) /
++								(i + 2);
++				err_rate = abs(new_rate - rate);
++				if (err_rate < fin_err) {
++					final_index = count;
++					fin_err = err_rate;
++					fin_rate = new_rate;
++					if (fin_err < error_2perc)
++						break;
++				}
++			}
++			if (fin_err < error_2perc)
++				break;
++		}
++#endif
++		/* Get the divisor by uart controller dll/dlm */
++		divider = clk_div16_get_divider(parent_rate, rate);
++
++		/* Get the best divider around calculated value */
++		if (divider > 2) {
++			for (i = divider - 2; i < (divider + 2); ++i) {
++				new_rate = parent_rate/i;
++				err_rate = abs(new_rate - rate);
++				if (err_rate < fin_err) {
++					final_index = count;
++					fin_err = err_rate;
++					fin_rate = parent_rate;
++					if (fin_err < error_2perc)
++						break;
++				}
++			}
++			if (fin_err < error_2perc)
++				break;
++		}
++	}
++
++	if (final_index >= 0) {
++		dev_info(t->uport.dev, "Setting clk_src %s\n",
++				pdata->parent_clk_list[final_index].name);
++		clk_set_parent(t->clk,
++			pdata->parent_clk_list[final_index].parent_clk);
++	}
++	return fin_rate;
++}
++
++#define UART_CLOCK_ACCURACY 5
++static void tegra_set_baudrate(struct tegra_uart_port *t, unsigned int baud)
++{
++	unsigned long rate;
++	unsigned int divisor;
++	unsigned char lcr;
++	unsigned int baud_actual;
++	unsigned int baud_delta;
++	unsigned long best_rate;
++
++	printk("[tegra_hsuart] In tegra_set_baudrate\n");
++	if (t->baud == baud)
++		return;
++
++	rate = baud * 16;
++	best_rate = find_best_clock_source(t, rate);
++	clk_set_rate(t->clk, best_rate);
++
++	rate = clk_get_rate(t->clk);
++
++	divisor = rate;
++	do_div(divisor, 16);
++	divisor += baud/2;
++	do_div(divisor, baud);
++
++	/* The allowable baudrate error from desired baudrate is 5%. */
++	baud_actual = divisor ? rate / (16 * divisor) : 0;
++	baud_delta = abs(baud_actual - baud);
++	if (WARN_ON(baud_delta * 20 > baud)) {
++		dev_err(t->uport.dev, "requested baud %u, actual %u\n",
++		        baud, baud_actual);
++	}
++
++	lcr = t->lcr_shadow;
++	lcr |= UART_LCR_DLAB;
++	uart_writeb(t, lcr, UART_LCR);
++
++	uart_writel(t, divisor & 0xFF, UART_TX);
++	uart_writel(t, ((divisor >> 8) & 0xFF), UART_IER);
++
++	lcr &= ~UART_LCR_DLAB;
++	uart_writeb(t, lcr, UART_LCR);
++	uart_readb(t, UART_SCR); /* Dummy read to ensure the write is posted. */
++
++	t->baud = baud;
++	wait_sym_time(t, 2); /* wait two character intervals at new rate. */
++	dev_dbg(t->uport.dev, "Baud %u clock freq %lu and divisor of %u\n",
++	        baud, rate, divisor);
++	printk("[tegra_hsuart] Out of tegra_set_baudrate\n");
++}
++
++static void tegra_set_termios(struct uart_port *u, struct ktermios *termios,
++                              struct ktermios *oldtermios)
++{
++	struct tegra_uart_port *t;
++	unsigned int baud;
++	unsigned long flags;
++	unsigned int lcr;
++	unsigned int c_cflag = termios->c_cflag;
++	unsigned char mcr;
++
++	t = container_of(u, struct tegra_uart_port, uport);
++	dev_vdbg(t->uport.dev, "+tegra_set_termios\n");
++
++	spin_lock_irqsave(&u->lock, flags);
++
++	/* Changing configuration, it is safe to stop any rx now. */
++	if (t->rts_active)
++		set_rts(t, false);
++
++	/* Clear all interrupts as configuration is going to be change. */
++	uart_writeb(t, t->ier_shadow | UART_IER_RDI, UART_IER);
++	uart_readb(t, UART_IER);
++	uart_writeb(t, 0, UART_IER);
++	uart_readb(t, UART_IER);
++
++	/* Parity. */
++	lcr = t->lcr_shadow;
++	lcr &= ~UART_LCR_PARITY;
++	if (PARENB == (c_cflag & PARENB)) {
++		if (CMSPAR == (c_cflag & CMSPAR)) {
++			/* FIXME: What is space parity? */
++			/* data |= SPACE_PARITY; */
++		} else if (c_cflag & PARODD) {
++			lcr |= UART_LCR_PARITY;
++			lcr &= ~UART_LCR_EPAR;
++			lcr &= ~UART_LCR_SPAR;
++		} else {
++			lcr |= UART_LCR_PARITY;
++			lcr |= UART_LCR_EPAR;
++			lcr &= ~UART_LCR_SPAR;
++		}
++	}
++
++	lcr &= ~UART_LCR_WLEN8;
++	switch (c_cflag & CSIZE) {
++	case CS5:
++		lcr |= UART_LCR_WLEN5;
++		break;
++	case CS6:
++		lcr |= UART_LCR_WLEN6;
++		break;
++	case CS7:
++		lcr |= UART_LCR_WLEN7;
++		break;
++	default:
++		lcr |= UART_LCR_WLEN8;
++		break;
++	}
++
++	/* Stop bits. */
++	if (termios->c_cflag & CSTOPB)
++		lcr |= UART_LCR_STOP;
++	else
++		lcr &= ~UART_LCR_STOP;
++
++	uart_writeb(t, lcr, UART_LCR);
++	t->lcr_shadow = lcr;
++
++	/* Baud rate. */
++	baud = uart_get_baud_rate(u, termios, oldtermios, 200, 4000000);
++	spin_unlock_irqrestore(&u->lock, flags);
++	tegra_set_baudrate(t, baud);
++	spin_lock_irqsave(&u->lock, flags);
++
++	/* Flow control. */
++	if (termios->c_cflag & CRTSCTS)	{
++		mcr = t->mcr_shadow;
++		mcr |= UART_MCR_CTS_EN;
++		mcr &= ~UART_MCR_RTS_EN;
++		t->mcr_shadow = mcr;
++		uart_writeb(t, mcr, UART_MCR);
++		t->use_cts_control = true;
++		/* If top layer has asked to set rts active then do so here. */
++		if (t->rts_active)
++			set_rts(t, true);
++	} else {
++		mcr = t->mcr_shadow;
++		mcr &= ~UART_MCR_CTS_EN;
++		mcr &= ~UART_MCR_RTS_EN;
++		t->mcr_shadow = mcr;
++		uart_writeb(t, mcr, UART_MCR);
++		t->use_cts_control = false;
++	}
++
++	/* Update the port timeout based on new settings. */
++	uart_update_timeout(u, termios->c_cflag, baud);
++
++	/* Make sure all write has completed. */
++	uart_readb(t, UART_IER);
++
++	/* Reenable interrupt. */
++	uart_writeb(t, t->ier_shadow, UART_IER);
++	uart_readb(t, UART_IER);
++
++	spin_unlock_irqrestore(&u->lock, flags);
++	dev_vdbg(t->uport.dev, "-tegra_set_termios\n");
++	return;
++}
++
++/*
++ * Flush any TX data submitted for DMA and PIO. Called when the
++ * TX circular buffer is reset.
++ */
++static void tegra_flush_buffer(struct uart_port *u)
++{
++	struct tegra_uart_port *t;
++
++	dev_vdbg(u->dev, "%s called", __func__);
++
++	t = container_of(u, struct tegra_uart_port, uport);
++
++	t->tx_bytes = 0;
++
++	if (t->use_tx_dma) {
++		tegra_dma_dequeue_req(t->tx_dma, &t->tx_dma_req);
++		t->tx_dma_req.size = 0;
++	}
++	return;
++}
++
++
++static void tegra_pm(struct uart_port *u, unsigned int state,
++                     unsigned int oldstate)
++{
++}
++
++static const char *tegra_type(struct uart_port *u)
++{
++	return TEGRA_UART_TYPE;
++}
++
++static struct uart_ops tegra_uart_ops = {
++	.tx_empty	= tegra_tx_empty,
++	.set_mctrl	= tegra_set_mctrl,
++	.get_mctrl	= tegra_get_mctrl,
++	.stop_tx	= tegra_stop_tx,
++	.start_tx	= tegra_start_tx,
++	.stop_rx	= tegra_stop_rx,
++	.flush_buffer	= tegra_flush_buffer,
++	.enable_ms	= tegra_enable_ms,
++	.break_ctl	= tegra_break_ctl,
++	.startup	= tegra_startup,
++	.shutdown	= tegra_shutdown,
++	.wake_peer	= tegra_wake_peer,
++	.set_termios	= tegra_set_termios,
++	.pm		= tegra_pm,
++	.type		= tegra_type,
++	.request_port	= tegra_request_port,
++	.release_port	= tegra_release_port,
++};
++
++static struct uart_driver tegra_uart_driver = {
++	.owner		= THIS_MODULE,
++	.driver_name	= "tegra_uart",
++	.dev_name	= "ttyHS",
++	.cons		= 0,
++	.nr		= 5,
++};
++
++static int __init tegra_uart_probe(struct platform_device *pdev)
++{
++	struct tegra_uart_port *t;
++	struct uart_port *u;
++	struct resource *resource;
++	int ret;
++	char name[64];
++	if (pdev->id < 0 || pdev->id > tegra_uart_driver.nr) {
++		pr_err("Invalid Uart instance (%d)\n", pdev->id);
++		return -ENODEV;
++	}
++
++	t = kzalloc(sizeof(struct tegra_uart_port), GFP_KERNEL);
++	if (!t) {
++		pr_err("%s: Failed to allocate memory\n", __func__);
++		return -ENOMEM;
++	}
++	u = &t->uport;
++	u->dev = &pdev->dev;
++	platform_set_drvdata(pdev, u);
++	u->line = pdev->id;
++	u->ops = &tegra_uart_ops;
++	u->type = PORT_TEGRA;
++	u->fifosize = 32;
++
++	resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (unlikely(!resource)) {
++		ret = -ENXIO;
++		goto fail;
++	}
++
++	u->mapbase = resource->start;
++	u->membase = IO_ADDRESS(u->mapbase);
++	if (unlikely(!u->membase)) {
++		ret = -ENOMEM;
++		goto fail;
++	}
++	u->iotype = UPIO_MEM32;
++
++	u->irq = platform_get_irq(pdev, 0);
++	if (unlikely(u->irq < 0)) {
++		ret = -ENXIO;
++		goto fail;
++	}
++
++	u->regshift = 2;
++
++	t->clk = clk_get(&pdev->dev, NULL);
++	if (IS_ERR_OR_NULL(t->clk)) {
++		dev_err(&pdev->dev, "Couldn't get the clock\n");
++		ret = -ENODEV;
++		goto fail;
++	}
++
++	ret = uart_add_one_port(&tegra_uart_driver, u);
++	if (ret) {
++		pr_err("%s: Failed(%d) to add uart port %s%d\n", __func__, ret,
++		       tegra_uart_driver.dev_name, u->line);
++		goto fail;
++	}
++
++	snprintf(name, sizeof(name), "tegra_hsuart_%d", u->line);
++	pr_info("Registered UART port %s%d\n",
++		tegra_uart_driver.dev_name, u->line);
++	t->uart_state = TEGRA_UART_CLOSED;
++
++	if (!RX_FORCE_PIO) {
++		ret = tegra_uart_init_rx_dma_buffer(t);
++		if (ret < 0) {
++			pr_err("%s: Failed(%d) to allocate rx dma buffer " \
++			       "%s%d\n", __func__, ret,
++			       tegra_uart_driver.dev_name, u->line);
++			goto rx_dma_buff_fail;
++		}
++	}
++	return ret;
++
++rx_dma_buff_fail:
++	uart_remove_one_port(&tegra_uart_driver, u);
++fail:
++	if (t->clk)
++		clk_put(t->clk);
++	platform_set_drvdata(pdev, NULL);
++	kfree(t);
++	return ret;
++}
++
++static int __devexit tegra_uart_remove(struct platform_device *pdev)
++{
++	struct tegra_uart_port *t = platform_get_drvdata(pdev);
++	struct uart_port *u;
++
++	if (pdev->id < 0 || pdev->id > tegra_uart_driver.nr)
++		pr_err("Invalid Uart instance (%d)\n", pdev->id);
++
++	u = &t->uport;
++	uart_remove_one_port(&tegra_uart_driver, u);
++
++	tegra_uart_free_rx_dma_buffer(t);
++
++	platform_set_drvdata(pdev, NULL);
++
++	pr_info("Unregistered UART port %s%d\n", tegra_uart_driver.dev_name,
++	        u->line);
++	kfree(t);
++	return 0;
++}
++
++static int tegra_uart_suspend(struct platform_device *pdev, pm_message_t state)
++{
++	struct tegra_uart_port *t = platform_get_drvdata(pdev);
++	struct uart_port *u;
++
++	if (pdev->id < 0 || pdev->id > tegra_uart_driver.nr)
++		pr_err("Invalid Uart instance (%d)\n", pdev->id);
++
++	u = &t->uport;
++	dev_dbg(t->uport.dev, "tegra_uart_suspend called\n");
++
++	/* Enable clock before calling suspend so that controller register can
++	 * be accessible. */
++	if (t->uart_state == TEGRA_UART_CLOCK_OFF) {
++		clk_enable(t->clk);
++		t->uart_state = TEGRA_UART_OPENED;
++	}
++
++	uart_suspend_port(&tegra_uart_driver, u);
++	t->uart_state = TEGRA_UART_SUSPEND;
++
++	return 0;
++}
++
++static int tegra_uart_resume(struct platform_device *pdev)
++{
++	struct tegra_uart_port *t = platform_get_drvdata(pdev);
++	struct uart_port *u;
++
++	if (pdev->id < 0 || pdev->id > tegra_uart_driver.nr)
++		pr_err("Invalid Uart instance (%d)\n", pdev->id);
++
++	u = &t->uport;
++	dev_dbg(t->uport.dev, "tegra_uart_resume called\n");
++
++	if (t->uart_state == TEGRA_UART_SUSPEND)
++		uart_resume_port(&tegra_uart_driver, u);
++	return 0;
++}
++
++/* Switch off the clock of the uart controller. */
++void tegra_uart_request_clock_off(struct uart_port *uport)
++{
++	unsigned long flags;
++	struct tegra_uart_port *t;
++	bool is_clk_disable = false;
++
++	if (IS_ERR_OR_NULL(uport))
++		BUG();
++
++	dev_vdbg(uport->dev, "tegra_uart_request_clock_off");
++
++	t = container_of(uport, struct tegra_uart_port, uport);
++	spin_lock_irqsave(&uport->lock, flags);
++	if (t->uart_state == TEGRA_UART_OPENED) {
++		is_clk_disable = true;
++		t->uart_state = TEGRA_UART_CLOCK_OFF;
++	}
++	spin_unlock_irqrestore(&uport->lock, flags);
++
++	if (is_clk_disable)
++		clk_disable(t->clk);
++
++	return;
++}
++
++/* Switch on the clock of the uart controller. */
++void tegra_uart_request_clock_on(struct uart_port *uport)
++{
++	unsigned long flags;
++	struct tegra_uart_port *t;
++	bool is_clk_enable = false;
++
++	if (IS_ERR_OR_NULL(uport))
++		BUG();
++
++	t = container_of(uport, struct tegra_uart_port, uport);
++	spin_lock_irqsave(&uport->lock, flags);
++	if (t->uart_state == TEGRA_UART_CLOCK_OFF) {
++		is_clk_enable = true;
++		t->uart_state = TEGRA_UART_OPENED;
++	}
++	spin_unlock_irqrestore(&uport->lock, flags);
++
++	if (is_clk_enable)
++		clk_enable(t->clk);
++
++	return;
++}
++
++/* Set the modem control signals state of uart controller. */
++void tegra_uart_set_mctrl(struct uart_port *uport, unsigned int mctrl)
++{
++	unsigned long flags;
++	struct tegra_uart_port *t;
++
++	t = container_of(uport, struct tegra_uart_port, uport);
++	if (t->uart_state != TEGRA_UART_OPENED) {
++		dev_err(t->uport.dev, "Uart is in invalid state\n");
++		return;
++	}
++
++	spin_lock_irqsave(&uport->lock, flags);
++	if (mctrl & TIOCM_RTS) {
++		t->rts_active = true;
++		set_rts(t, true);
++	} else {
++		t->rts_active = false;
++		set_rts(t, false);
++	}
++
++	if (mctrl & TIOCM_DTR)
++		set_dtr(t, true);
++	else
++		set_dtr(t, false);
++	spin_unlock_irqrestore(&uport->lock, flags);
++	return;
++}
++
++/*
++ * Return the status of the transmit fifo whether empty or not.
++ * Return 0 if tx fifo is not empty.
++ * Return TIOCSER_TEMT if tx fifo is empty.
++ */
++int tegra_uart_is_tx_empty(struct uart_port *uport)
++{
++	return tegra_tx_empty(uport);
++}
++
++static struct platform_driver tegra_uart_platform_driver __refdata= {
++	.probe		= tegra_uart_probe,
++	.remove		= __devexit_p(tegra_uart_remove),
++	.suspend	= tegra_uart_suspend,
++	.resume		= tegra_uart_resume,
++	.driver		= {
++		.name	= "tegra_uart"
++	}
++};
++
++static int __init tegra_uart_init(void)
++{
++	int ret;
++	int address;
++
++	if (!param_va) {
++		printk("<1>No VA address specified\n");
++		return -1;
++	}
++	if (1 != sscanf(param_va, "0x%x", &address)) {
++		printk("<1>Error converting to hex\n");
++		return -1;
++	}
++	our_buffer_va = address;
++	printk("<1>our_buffer_va: 0x%x\n", our_buffer_va);
++
++	if (!param_pa) {
++		printk("<1>No PA address specified\n");
++		return -1;
++	}
++	if (1 != sscanf(param_pa, "0x%x", &address)) {
++		printk("<1>Error converting to hex\n");
++		return -1;
++	}
++	our_buffer_pa = address;
++	printk("<1>our_buffer_pa: 0x%x\n", our_buffer_pa);
++
++	if (!param_size) {
++		printk("<1>No size specified\n");
++		return -1;
++	}
++	if (1 != sscanf(param_size, "%d", &address)) {
++		printk("<1>Error converting to decimal\n");
++		return -1;
++	}
++	our_size = address;
++	printk("<1>our_size: %d\n", our_size);
++
++	ret = uart_register_driver(&tegra_uart_driver);
++	if (unlikely(ret)) {
++		pr_err("Could not register %s driver\n",
++		       tegra_uart_driver.driver_name);
++		return ret;
++	}
++
++	ret = platform_driver_register(&tegra_uart_platform_driver);
++	if (unlikely(ret)) {
++		pr_err("Could not register the UART platfrom driver\n");
++		uart_unregister_driver(&tegra_uart_driver);
++		return ret;
++	}
++
++	pr_info("Initialized tegra uart driver\n");
++	return 0;
++}
++
++static void __exit tegra_uart_exit(void)
++{
++	pr_info("Unloading tegra uart driver\n");
++	platform_driver_unregister(&tegra_uart_platform_driver);
++	uart_unregister_driver(&tegra_uart_driver);
++}
++
++module_param(param_va, charp, S_IRUGO);
++module_param(param_pa, charp, S_IRUGO);
++module_param(param_size, charp, S_IRUGO);
++module_init(tegra_uart_init);
++module_exit(tegra_uart_exit);
++MODULE_DESCRIPTION("High speed UART driver for tegra chipset");
++MODULE_LICENSE("Dual BSD/GPL");
+diff --git a/drivers/tty/serial/Kconfig b/drivers/tty/serial/Kconfig
+index 5c9d989..8a10cfe 100644
+--- a/drivers/tty/serial/Kconfig
++++ b/drivers/tty/serial/Kconfig
+@@ -529,7 +529,7 @@ config SERIAL_S5PV210
+ 	  Serial port support for Samsung's S5P Family of SoC's
+ 
+ config SERIAL_TEGRA
+-	boolean "High speed serial support for NVIDIA Tegra SoCs"
++	tristate "High speed serial support for NVIDIA Tegra SoCs"
+ 	depends on ARCH_TEGRA && TEGRA_SYSTEM_DMA
+ 	select SERIAL_CORE
+ 	help
+diff --git a/include/asm-generic/pgtable.h b/include/asm-generic/pgtable.h
+index 76bff2b..e3389f5 100644
+--- a/include/asm-generic/pgtable.h
++++ b/include/asm-generic/pgtable.h
+@@ -18,6 +18,8 @@ extern int pmdp_set_access_flags(struct vm_area_struct *vma,
+ 				 pmd_t entry, int dirty);
+ #endif
+ 
++extern pte_t ptep_test_and_set_encrypted(pte_t pte);
++
+ #ifndef __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
+ static inline int ptep_test_and_clear_young(struct vm_area_struct *vma,
+ 					    unsigned long address,
+diff --git a/include/linux/cachelock.h b/include/linux/cachelock.h
+new file mode 100644
+index 0000000..d736878
+--- /dev/null
++++ b/include/linux/cachelock.h
+@@ -0,0 +1,17 @@
++#ifndef _CACHELOCK_H
++#define _CACHELOCK_H
++
++#ifdef __KERNEL__
++#include <linux/device.h>
++
++extern bool cachelock_loaded;
++extern bool cachelock_loaded_done;
++extern unsigned long cachelock_mem_start;
++extern unsigned long cachelock_mem_end;
++extern unsigned long cachelock_mem_pa_start;
++extern unsigned long cachelock_mem_pa_end;
++extern bool cachelock_force_flush;
++
++#endif
++
++#endif
+diff --git a/include/linux/cachelock_pool.h b/include/linux/cachelock_pool.h
+new file mode 100644
+index 0000000..3fe27ec
+--- /dev/null
++++ b/include/linux/cachelock_pool.h
+@@ -0,0 +1,24 @@
++#ifndef _CACHELOCK_POOL_H
++#define _CACHELOCK_POOL_H
++
++#define CACHELOCK_AES_SIZE	((2 * 1024) + (2 * 256) + 40)
++
++typedef struct cl_block {
++	struct list_head list;
++	unsigned long addr;     /* Where it is in normal memory. */
++	unsigned long cl_addr;  /* Where it is in the cache-locked memory. */
++	struct page *page;      /* The original page struct. */
++	pte_t pte;
++} cl_block_t;
++
++typedef struct cl_pool {
++	unsigned free_slots;
++	struct list_head free_list;
++	struct list_head taken_list;
++} cl_pool_t;
++
++int cachelock_pool_init(void);
++struct page *cachelock_remap_page(struct mm_struct *mm, unsigned long addr,
++                                  struct page *page);
++
++#endif
+diff --git a/include/linux/crypto.h b/include/linux/crypto.h
+index e5e468e..9bdc03c 100644
+--- a/include/linux/crypto.h
++++ b/include/linux/crypto.h
+@@ -874,6 +874,16 @@ static inline struct crypto_blkcipher *crypto_blkcipher_cast(
+ 	return __crypto_blkcipher_cast(tfm);
+ }
+ 
++static inline struct crypto_blkcipher *crypto_alloc_blkcipher_cachelock(
++	const char *alg_name, u32 type, u32 mask)
++{
++	type &= ~CRYPTO_ALG_TYPE_MASK;
++	type |= CRYPTO_ALG_TYPE_BLKCIPHER;
++	mask |= CRYPTO_ALG_TYPE_MASK;
++
++	return __crypto_blkcipher_cast(crypto_alloc_base(alg_name, type, mask));
++}
++
+ static inline struct crypto_blkcipher *crypto_alloc_blkcipher(
+ 	const char *alg_name, u32 type, u32 mask)
+ {
+diff --git a/include/linux/memencrypt.h b/include/linux/memencrypt.h
+new file mode 100644
+index 0000000..91fbabf
+--- /dev/null
++++ b/include/linux/memencrypt.h
+@@ -0,0 +1,12 @@
++#ifndef MEMENCRYPT_H
++#define MEMENCRYPT_H
++
++void decrypt_dma(struct task_struct* task);
++void decrypt_vma(struct mm_struct *mm, struct vm_area_struct *vma);
++bool decrypt_page(struct mm_struct *mm, unsigned long addr, struct page *page);
++
++bool encrypt_page(struct page *page, unsigned long addr);
++
++pte_t *vir_to_pte(struct mm_struct *mm, unsigned long addr);
++
++#endif
+diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
+index e90a673..3b5d240 100644
+--- a/include/linux/page-flags.h
++++ b/include/linux/page-flags.h
+@@ -107,6 +107,7 @@ enum pageflags {
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+ 	PG_compound_lock,
+ #endif
++	PG_encrypted,
+ 	__NR_PAGEFLAGS,
+ 
+ 	/* Filesystems */
+@@ -206,6 +207,7 @@ PAGEFLAG(Pinned, pinned) TESTSCFLAG(Pinned, pinned)	/* Xen */
+ PAGEFLAG(SavePinned, savepinned);			/* Xen */
+ PAGEFLAG(Reserved, reserved) __CLEARPAGEFLAG(Reserved, reserved)
+ PAGEFLAG(SwapBacked, swapbacked) __CLEARPAGEFLAG(SwapBacked, swapbacked)
++PAGEFLAG(Encrypted, encrypted) TESTSCFLAG(Encrypted, encrypted) __CLEARPAGEFLAG(Encrypted, encrypted)
+ 
+ __PAGEFLAG(SlobFree, slob_free)
+ 
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index c9e03a9..15214a8 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1760,7 +1760,12 @@ extern int task_free_unregister(struct notifier_block *n);
+ /*
+  * Per process flags
+  */
++#if 0
+ #define PF_STARTING	0x00000002	/* being created */
++#else
++/* There are no more flags, so steal one. */
++#define PF_ENCRYPTED	0x00000002	/* Process memory is encrypted */
++#endif
+ #define PF_EXITING	0x00000004	/* getting shut down */
+ #define PF_EXITPIDONE	0x00000008	/* pi exit done on shut down */
+ #define PF_VCPU		0x00000010	/* I'm a virtual CPU */
+diff --git a/kernel/fork.c b/kernel/fork.c
+index f65fa06..bc628ae 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1014,7 +1014,10 @@ static void copy_flags(unsigned long clone_flags, struct task_struct *p)
+ 
+ 	new_flags &= ~(PF_SUPERPRIV | PF_WQ_WORKER);
+ 	new_flags |= PF_FORKNOEXEC;
++#if 0
++	/* Remove references to starting flag when using encryption. */
+ 	new_flags |= PF_STARTING;
++#endif
+ 	p->flags = new_flags;
+ 	clear_freeze_flag(p);
+ }
+@@ -1557,7 +1560,10 @@ long do_fork(unsigned long clone_flags,
+ 		 * hasn't finished SIGSTOP raising yet.  Now we clear it
+ 		 * and set the child going.
+ 		 */
++#if 0
++		/* Remove references to starting flag when using encryption. */
+ 		p->flags &= ~PF_STARTING;
++#endif
+ 
+ 		wake_up_new_task(p);
+ 
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 0eedbf8..c6684a1 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -35,6 +35,7 @@
+ #include <linux/memcontrol.h>
+ #include <linux/cleancache.h>
+ #include "internal.h"
++#include <linux/memencrypt.h>
+ 
+ /*
+  * FIXME: remove all knowledge of the buffer layer from the core VM
+@@ -1310,6 +1311,11 @@ int file_read_actor(read_descriptor_t *desc, struct page *page,
+ 	char *kaddr;
+ 	unsigned long left, count = desc->count;
+ 
++	if (PageEncrypted(page)) {
++		pr_err("filemap: file_read_actor: %s: page encrypted pfn %lu\n",
++		       current->comm, page_to_pfn(page));
++	}
++
+ 	if (size > count)
+ 		size = count;
+ 
+diff --git a/mm/memory.c b/mm/memory.c
+index b2b8731..859732c 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -52,6 +52,7 @@
+ #include <linux/init.h>
+ #include <linux/writeback.h>
+ #include <linux/memcontrol.h>
++#include <linux/memencrypt.h>
+ #include <linux/mmu_notifier.h>
+ #include <linux/kallsyms.h>
+ #include <linux/swapops.h>
+@@ -886,6 +887,7 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+ 				 */
+ 				make_migration_entry_read(&entry);
+ 				pte = swp_entry_to_pte(entry);
++				pte = ptep_test_and_set_encrypted(pte);
+ 				set_pte_at(src_mm, addr, src_pte, pte);
+ 			}
+ 		}
+@@ -2258,8 +2260,9 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
+ 	if (addr == vma->vm_start && end == vma->vm_end) {
+ 		vma->vm_pgoff = pfn;
+ 		vma->vm_flags |= VM_PFN_AT_MMAP;
+-	} else if (is_cow_mapping(vma->vm_flags))
++	} else if (is_cow_mapping(vma->vm_flags)) {
+ 		return -EINVAL;
++	}
+ 
+ 	vma->vm_flags |= VM_IO | VM_RESERVED | VM_PFNMAP;
+ 
+@@ -3112,6 +3115,7 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	inc_mm_counter_fast(mm, MM_ANONPAGES);
+ 	page_add_new_anon_rmap(page, vma, address);
+ setpte:
++	entry = ptep_test_and_set_encrypted(entry);
+ 	set_pte_at(mm, address, page_table, entry);
+ 
+ 	/* No need to invalidate - it was non-present before */
+@@ -3274,6 +3278,7 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 				get_page(dirty_page);
+ 			}
+ 		}
++		entry = ptep_test_and_set_encrypted(entry);
+ 		set_pte_at(mm, address, page_table, entry);
+ 
+ 		/* no need to invalidate: a not-present page won't be cached */
+@@ -3794,6 +3799,10 @@ static int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
+ 			if (bytes > PAGE_SIZE-offset)
+ 				bytes = PAGE_SIZE-offset;
+ 
++			if (PageEncrypted(page)) {
++				decrypt_page(mm, addr, page);
++			}
++
+ 			maddr = kmap(page);
+ 			if (write) {
+ 				copy_to_user_page(vma, page, addr,
+diff --git a/mm/mprotect.c b/mm/mprotect.c
+index 5a688a2..1b11a7e 100644
+--- a/mm/mprotect.c
++++ b/mm/mprotect.c
+@@ -15,6 +15,7 @@
+ #include <linux/fs.h>
+ #include <linux/highmem.h>
+ #include <linux/security.h>
++#include <linux/memencrypt.h>
+ #include <linux/mempolicy.h>
+ #include <linux/personality.h>
+ #include <linux/syscalls.h>
+@@ -28,6 +29,7 @@
+ #include <asm/cacheflush.h>
+ #include <asm/tlbflush.h>
+ 
++
+ #ifndef pgprot_modify
+ static inline pgprot_t pgprot_modify(pgprot_t oldprot, pgprot_t newprot)
+ {
+@@ -59,6 +61,7 @@ static void change_pte_range(struct mm_struct *mm, pmd_t *pmd,
+ 			if (dirty_accountable && pte_dirty(ptent))
+ 				ptent = pte_mkwrite(ptent);
+ 
++			ptent = ptep_test_and_set_encrypted(ptent);
+ 			ptep_modify_prot_commit(mm, addr, pte, ptent);
+ 		} else if (PAGE_MIGRATION && !pte_file(oldpte)) {
+ 			swp_entry_t entry = pte_to_swp_entry(oldpte);
+@@ -68,9 +71,11 @@ static void change_pte_range(struct mm_struct *mm, pmd_t *pmd,
+ 				 * A protection check is difficult so
+ 				 * just be safe and disable write
+ 				 */
++				pte_t p;
+ 				make_migration_entry_read(&entry);
+-				set_pte_at(mm, addr, pte,
+-					swp_entry_to_pte(entry));
++				p = swp_entry_to_pte(entry);
++				p = ptep_test_and_set_encrypted(p);
++				set_pte_at(mm, addr, pte, p);
+ 			}
+ 		}
+ 	} while (pte++, addr += PAGE_SIZE, addr != end);
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 8859578..43b4e01 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -5794,6 +5794,7 @@ static struct trace_print_flags pageflag_names[] = {
+ #ifdef CONFIG_MMU
+ 	{1UL << PG_mlocked,		"mlocked"	},
+ #endif
++	{1UL << PG_encrypted,		"encrypted"	},
+ #ifdef CONFIG_ARCH_USES_PG_UNCACHED
+ 	{1UL << PG_uncached,		"uncached"	},
+ #endif
+diff --git a/mm/pgtable-generic.c b/mm/pgtable-generic.c
+index eb663fb..329a6e9 100644
+--- a/mm/pgtable-generic.c
++++ b/mm/pgtable-generic.c
+@@ -119,3 +119,12 @@ pmd_t pmdp_splitting_flush(struct vm_area_struct *vma, unsigned long address,
+ }
+ #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
+ #endif
++
++pte_t ptep_test_and_set_encrypted(pte_t pte)
++{
++	if (PageEncrypted(pte_page(pte)) && !pte_encrypted(pte)) {
++		pte = pte_mkold(pte);
++		pte = pte_mkencrypted(pte);
++	}
++	return pte;
++}
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index 3a65d6f7..b4944fd 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -30,6 +30,7 @@
+ #include <asm/uaccess.h>
+ #include <asm/tlbflush.h>
+ #include <asm/shmparam.h>
++#include <linux/memencrypt.h>
+ 
+ /*** Page table manipulation functions ***/
+ 
+@@ -1251,7 +1252,9 @@ EXPORT_SYMBOL_GPL(map_vm_area);
+ 
+ /*** Old vmalloc interfaces ***/
+ DEFINE_RWLOCK(vmlist_lock);
++EXPORT_SYMBOL(vmlist_lock);
+ struct vm_struct *vmlist;
++EXPORT_SYMBOL(vmlist);
+ 
+ static void setup_vmalloc_vm(struct vm_struct *vm, struct vmap_area *va,
+ 			      unsigned long flags, void *caller)
