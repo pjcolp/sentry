@@ -4112,21 +4112,6 @@ index 0000000..6071bed
 +}
 +
 +early_initcall(memencrypt_init);
-diff --git a/build.sh b/build.sh
-new file mode 100755
-index 0000000..1711f94
---- /dev/null
-+++ b/build.sh
-@@ -0,0 +1,9 @@
-+#!/bin/bash
-+
-+#BASEPATH=/home/pjcolp/Projects/aes
-+
-+export CROSS_COMPILE=/home/pjcolp/Projects/aes/crosstool/crosstool-ng/install/bin/arm-cortex_a9-linux-gnueabi-
-+export TEGRA_KERNEL_OUT=/home/pjcolp/Projects/aes/Linux_for_Tegra/sources/kernel_source.out
-+export ARCH=arm
-+
-+make -j5 O=$TEGRA_KERNEL_OUT EXTRA_AFLAGS="-mfpu=neon -mtune=cortex-a9" INSTALL_MOD_PATH=mods zImage
 diff --git a/drivers/ram2ram/Makefile b/drivers/ram2ram/Makefile
 new file mode 100644
 index 0000000..7658a6c
