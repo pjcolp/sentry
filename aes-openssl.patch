@@ -1702,18 +1702,11 @@ new file mode 100644
 index 0000000..f1eb005
 --- /dev/null
 +++ b/arch/arm/aes-openssl/aes-onsoc_glue.c
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,296 @@
 +/*
 + * Cryptographic API.
 + *
 + * Support for On-SoC AES.
-+ *
-+ * Copyright (c) 2011 Microsoft Corporation
-+ * Author: Patrick Colp <t-patrco@microsoft.com>
-+ *
-+ * This program is free software; you can redistribute it and/or modify
-+ * it under the terms of the GNU General Public License version 2 as published
-+ * by the Free Software Foundation.
 + */
 +
 +#include <linux/module.h>
@@ -2004,8 +1997,6 @@ index 0000000..f1eb005
 +
 +
 +MODULE_DESCRIPTION("On-SoC OpenSSL AES support. vers=1.2 (3/25/2013)");
-+MODULE_LICENSE("GPL v2");
-+MODULE_AUTHOR("Patrick Colp");
 +MODULE_ALIAS("aes");
 +MODULE_ALIAS("aes-asm");
 diff --git a/arch/arm/aes-openssl/aes.h b/arch/arm/aes-openssl/aes.h
