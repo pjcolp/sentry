@@ -2074,66 +2074,6 @@ index 0000000..9b8d208
 +                 size_t len, unsigned char *ivec);
 +void AES_cbc_dec(struct aes_ctx *ctx, unsigned char *out, const unsigned char *in,
 +                 size_t len, unsigned char *ivec);
-diff --git a/arch/arm/aes-openssl/aw-notes.txt b/arch/arm/aes-openssl/aw-notes.txt
-new file mode 100644
-index 0000000..58a2dcc
---- /dev/null
-+++ b/arch/arm/aes-openssl/aw-notes.txt
-@@ -0,0 +1,54 @@
-+
-+aes-glue.c, aes.h, aes-arm.s, aes-neon.s: 
-+   these versions are identical to the checked-in versions from benchmarks/opensslonsoc-dyn.
-+
-+===============================================
-+Changes to aes-glue.c:
-+===============================================
-+- add #define KERNEL to the top of the file
-+
-+===============================================
-+Changes to aes-onsoc_glue.c:
-+===============================================
-+There are a bunch of changes between this version and patrick & himanshu's original version:
-+
-+- change #define AESONSOC_TEST 1 to #define AESONSOC_TEST 0
-+
-+- eliminated ifdef for AESONSOC_CBC: cbc is always enabled
-+
-+- removed: ecb_encrypt, ecb_decrypt, blk_ecb_alg
-+  removed references to aesonsoc_ecb_{enc,dec} routines
-+
-+- removed: aes_encrypt, aes_decrypt, aesonsoc_alg
-+  removed references to aesonsoc_{enc,dec} routines
-+
-+- changed #if 0 to #if AESONSOC_TEST in some places
-+
-+- Eliminated initialization and cleanup code to 
-+  register and unregister aesonsoc_alg and blk_ecb_alg.
-+
-+- Eliminated existing code for AESONSOC_CACHE_LOCK, but left in the #define
-+  so that we can add back in the correct code for handling this...
-+
-+- Added the useneon flag to indicate whether or not the version of openssl aes we are
-+  currently using is the neon version.  modified aes_set_key, cbc_encrypt, cbc_decrypt 
-+  to use this flag.  made useneon a module parameter.
-+
-+- Modified the cbc_encrypt and cbc_decrypt routines to check the
-+  last_op, and if it isn't a match, then call aes_set_key_common.
-+
-+- Modified the aes_set_key routine so that if we are not using neon, then we call
-+  aes_set_key_common with operation = NONE.
-+
-+- changed all calls to aes_asm_set_key_{enc,dec} to AES_set_{encrypt,decrypt}_key
-+  removed all the asmlinkage forward references, added #include for aes.h
-+
-+- cleanup the forward references to asm routines that are no longer needed
-+
-+- modified copy_into_locked to call AES_init_tables using the locked_mem_area symbol
-+
-+- added counters for encryption ops & bytes, print counters at module unload time
-+
-+XXX todo:
-+  potentially incorrect args to AES_set_{encrypt,decrypt}_key
-+
 diff --git a/arch/arm/cachelock/Makefile b/arch/arm/cachelock/Makefile
 new file mode 100644
 index 0000000..f60dbdf
