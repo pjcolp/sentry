@@ -21,7 +21,8 @@ These patches were created on a Tegra 3 tablet running a customized version of L
 4. dm-crypt-on-soc.patch
 
 To test the system, apply the following patch:
-user-level-on-soc-setup.patch
+
+1. user-level-on-soc-setup.patch
 
 ## License
 
