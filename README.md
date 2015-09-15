@@ -16,7 +16,7 @@ These patches were created on a Tegra 3 tablet running a customized version of L
 
 2. cache-locking patch
 
-3. encrypt-on-soc-on-page-in-decrypt-on-page-out.patch
+3. on-soc-encrypt-on-page-in-decrypt-on-page-out.patch
 
 4. dm-crypt-on-soc.patch
 
