@@ -1,0 +1,2063 @@
+diff --git a/arch/arm/Makefile b/arch/arm/Makefile
+index 959e3c6..55eb682 100644
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -263,6 +263,9 @@ libs-y				:= arch/arm/lib/ $(libs-y)
+ # Build cachelock module.
+ core-m				+= arch/arm/cachelock/
+ 
++# Build aes-on-soc module.
++core-m				+= arch/arm/aes-openssl/
++
+ 
+ # Default target when executing plain make
+ ifeq ($(CONFIG_XIP_KERNEL),y)
+diff --git a/arch/arm/aes-openssl/Makefile b/arch/arm/aes-openssl/Makefile
+new file mode 100644
+index 0000000..13d9118
+--- /dev/null
++++ b/arch/arm/aes-openssl/Makefile
+@@ -0,0 +1,7 @@
++#
++# Arch-specific CryptoAPI modules.
++#
++
++obj-m				+= aes-openssl.o
++
++aes-openssl-y		:= aes-arm.o aes-neon.o aes-glue.o aes-onsoc_glue.o
+diff --git a/arch/arm/aes-openssl/aes-arm.S b/arch/arm/aes-openssl/aes-arm.S
+new file mode 100644
+index 0000000..576c0da
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-arm.S
+@@ -0,0 +1,355 @@
++@ openssl implementation of AES in ARM assembly
++.text
++.code	32
++
++@ void AES_encrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global AES_encrypt
++.type   AES_encrypt,%function
++.align	5
++AES_encrypt:
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr	r10,=AES_Te
++	ldr	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_armv4_AES_encrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++	ldmia	sp!,{r4-r12,pc}
++.size	AES_encrypt,.-AES_encrypt
++
++.type   _armv4_AES_encrypt,%function
++.align	2
++_armv4_AES_encrypt:
++	str	lr,[sp,#-4]!		@ push lr
++	ldmia	r11!,{r4-r7}
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240-16]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0,lsr#16
++	mov	r0,r0,lsr#24
++.Lenc_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Te3[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Te2[s0>>8]
++	and	r8,lr,r1
++	ldr	r6,[r10,r9,lsl#2]	@ Te1[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Te0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Te1[s1>>16]
++	ldr	r8,[r10,r8,lsl#2]	@ Te3[s1>>0]
++	ldr	r9,[r10,r9,lsl#2]	@ Te2[s1>>8]
++	eor	r0,r0,r7,ror#8
++	ldr	r1,[r10,r1,lsl#2]	@ Te0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,ror#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r6,r9,ror#8
++	and	r9,lr,r2
++	ldr	r7,[r10,r7,lsl#2]	@ Te2[s2>>8]
++	eor	r1,r1,r4,ror#24
++	ldr	r8,[r10,r8,lsl#2]	@ Te1[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te3[s2>>0]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Te0[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,ror#8
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r6,r9,ror#16
++	and	r9,lr,r3,lsr#16	@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Te3[s3>>0]
++	eor	r2,r2,r5,ror#16
++	ldr	r8,[r10,r8,lsl#2]	@ Te2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te1[s3>>16]
++	eor	r0,r0,r7,ror#24
++	ldr	r7,[r11],#16
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Te0[s3>>24]
++	eor	r2,r2,r9,ror#8
++	ldr	r4,[r11,#-12]
++	eor	r3,r3,r6,ror#8
++
++	ldr	r5,[r11,#-8]
++	eor	r0,r0,r7
++	ldr	r6,[r11,#-4]
++	and	r7,lr,r0
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0,lsr#16
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Lenc_loop
++
++	add	r10,r10,#2
++
++	ldrb	r4,[r10,r7,lsl#2]	@ Te4[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldrb	r5,[r10,r8,lsl#2]	@ Te4[s0>>8]
++	and	r8,lr,r1
++	ldrb	r6,[r10,r9,lsl#2]	@ Te4[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldrb	r0,[r10,r0,lsl#2]	@ Te4[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s1>>16]
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s1>>0]
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s1>>8]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r1,[r10,r1,lsl#2]	@ Te4[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,lsl#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s2>>8]
++	eor	r1,r4,r1,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s2>>0]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r2,[r10,r2,lsl#2]	@ Te4[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r3,lsr#16	@ i2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s3>>0]
++	eor	r2,r5,r2,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s3>>16]
++	eor	r0,r7,r0,lsl#8
++	ldr	r7,[r11,#0]
++	ldrb	r3,[r10,r3,lsl#2]	@ Te4[s3>>24]
++	eor	r1,r1,r8,lsl#8
++	ldr	r4,[r11,#4]
++	eor	r2,r2,r9,lsl#16
++	ldr	r5,[r11,#8]
++	eor	r3,r6,r3,lsl#24
++	ldr	r6,[r11,#12]
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#2
++	ldr	pc,[sp],#4		@ pop and return
++.size	_armv4_AES_encrypt,.-_armv4_AES_encrypt
++
++
++@ void AES_decrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global AES_decrypt
++.type   AES_decrypt,%function
++.align	5
++AES_decrypt:
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr	r10,=AES_Td
++	ldr	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_armv4_AES_decrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++
++	ldmia	sp!,{r4-r12,pc}
++.size	AES_decrypt,.-AES_decrypt
++
++.type   _armv4_AES_decrypt,%function
++.align	2
++_armv4_AES_decrypt:
++	str	lr,[sp,#-4]!		@ push lr
++	ldmia	r11!,{r4-r7}
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240-16]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0,lsr#16
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0
++	mov	r0,r0,lsr#24
++.Ldec_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Td1[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Td2[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldr	r6,[r10,r9,lsl#2]	@ Td3[s0>>0]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Td0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Td3[s1>>0]
++	ldr	r8,[r10,r8,lsl#2]	@ Td1[s1>>16]
++	ldr	r9,[r10,r9,lsl#2]	@ Td2[s1>>8]
++	eor	r0,r0,r7,ror#24
++	ldr	r1,[r10,r1,lsl#2]	@ Td0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,ror#8
++	and	r8,lr,r2		@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r2,lsr#16
++	ldr	r7,[r10,r7,lsl#2]	@ Td2[s2>>8]
++	eor	r1,r1,r4,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td3[s2>>0]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td1[s2>>16]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Td0[s2>>24]
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r1,r1,r8,ror#24
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r3		@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Td1[s3>>16]
++	eor	r2,r2,r5,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td3[s3>>0]
++	eor	r0,r0,r7,ror#8
++	ldr	r7,[r11],#16
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Td0[s3>>24]
++	eor	r2,r2,r9,ror#24
++
++	ldr	r4,[r11,#-12]
++	eor	r0,r0,r7
++	ldr	r5,[r11,#-8]
++	eor	r3,r3,r6,ror#8
++	ldr	r6,[r11,#-4]
++	and	r7,lr,r0,lsr#16
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Ldec_loop
++
++	add	r10,r10,#1024
++
++	ldr	r5,[r10,#0]		@ prefetch Td4
++	ldr	r6,[r10,#32]
++	ldr	r4,[r10,#64]
++	ldr	r5,[r10,#96]
++	ldr	r6,[r10,#128]
++	ldr	r4,[r10,#160]
++	ldr	r5,[r10,#192]
++	ldr	r6,[r10,#224]
++
++	ldrb	r0,[r10,r0]		@ Td4[s0>>24]
++	ldrb	r4,[r10,r7]		@ Td4[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldrb	r5,[r10,r8]		@ Td4[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldrb	r6,[r10,r9]		@ Td4[s0>>0]
++	and	r9,lr,r1,lsr#8
++
++	ldrb	r7,[r10,r7]		@ Td4[s1>>0]
++	ldrb	r1,[r10,r1,lsr#24]	@ Td4[s1>>24]
++	ldrb	r8,[r10,r8]		@ Td4[s1>>16]
++	eor	r0,r7,r0,lsl#24
++	ldrb	r9,[r10,r9]		@ Td4[s1>>8]
++	eor	r1,r4,r1,lsl#8
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,lsl#8
++	and	r8,lr,r2		@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s2>>8]
++	eor	r6,r6,r9,lsl#8
++	ldrb	r8,[r10,r8]		@ Td4[s2>>0]
++	and	r9,lr,r2,lsr#16
++
++	ldrb	r2,[r10,r2,lsr#24]	@ Td4[s2>>24]
++	eor	r0,r0,r7,lsl#8
++	ldrb	r9,[r10,r9]		@ Td4[s2>>16]
++	eor	r1,r8,r1,lsl#16
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r2,r5,r2,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s3>>16]
++	eor	r6,r6,r9,lsl#16
++	ldrb	r8,[r10,r8]		@ Td4[s3>>8]
++	and	r9,lr,r3		@ i2
++
++	ldrb	r9,[r10,r9]		@ Td4[s3>>0]
++	ldrb	r3,[r10,r3,lsr#24]	@ Td4[s3>>24]
++	eor	r0,r0,r7,lsl#16
++	ldr	r7,[r11,#0]
++	eor	r1,r1,r8,lsl#8
++	ldr	r4,[r11,#4]
++	eor	r2,r9,r2,lsl#8
++	ldr	r5,[r11,#8]
++	eor	r3,r6,r3,lsl#24
++	ldr	r6,[r11,#12]
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#1024
++	ldr	pc,[sp],#4		@ pop and return
++.size	_armv4_AES_decrypt,.-_armv4_AES_decrypt
++.asciz	"AES for ARMv4, CRYPTOGAMS by <appro@openssl.org>"
++.align	2
+diff --git a/arch/arm/aes-openssl/aes-glue.c b/arch/arm/aes-openssl/aes-glue.c
+new file mode 100644
+index 0000000..88cb5e5
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-glue.c
+@@ -0,0 +1,459 @@
++#define KERNEL
++
++#ifdef KERNEL
++#include <linux/string.h>
++#else
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#endif
++
++#include "aes.h"
++
++static const unsigned int orig_AES_Te[] = {
++  0xc66363a5, 0xf87c7c84, 0xee777799, 0xf67b7b8d,
++  0xfff2f20d, 0xd66b6bbd, 0xde6f6fb1, 0x91c5c554,
++  0x60303050, 0x02010103, 0xce6767a9, 0x562b2b7d,
++  0xe7fefe19, 0xb5d7d762, 0x4dababe6, 0xec76769a,
++  0x8fcaca45, 0x1f82829d, 0x89c9c940, 0xfa7d7d87,
++  0xeffafa15, 0xb25959eb, 0x8e4747c9, 0xfbf0f00b,
++  0x41adadec, 0xb3d4d467, 0x5fa2a2fd, 0x45afafea,
++  0x239c9cbf, 0x53a4a4f7, 0xe4727296, 0x9bc0c05b,
++  0x75b7b7c2, 0xe1fdfd1c, 0x3d9393ae, 0x4c26266a,
++  0x6c36365a, 0x7e3f3f41, 0xf5f7f702, 0x83cccc4f,
++  0x6834345c, 0x51a5a5f4, 0xd1e5e534, 0xf9f1f108,
++  0xe2717193, 0xabd8d873, 0x62313153, 0x2a15153f,
++  0x0804040c, 0x95c7c752, 0x46232365, 0x9dc3c35e,
++  0x30181828, 0x379696a1, 0x0a05050f, 0x2f9a9ab5,
++  0x0e070709, 0x24121236, 0x1b80809b, 0xdfe2e23d,
++  0xcdebeb26, 0x4e272769, 0x7fb2b2cd, 0xea75759f,
++  0x1209091b, 0x1d83839e, 0x582c2c74, 0x341a1a2e,
++  0x361b1b2d, 0xdc6e6eb2, 0xb45a5aee, 0x5ba0a0fb,
++  0xa45252f6, 0x763b3b4d, 0xb7d6d661, 0x7db3b3ce,
++  0x5229297b, 0xdde3e33e, 0x5e2f2f71, 0x13848497,
++  0xa65353f5, 0xb9d1d168, 0x00000000, 0xc1eded2c,
++  0x40202060, 0xe3fcfc1f, 0x79b1b1c8, 0xb65b5bed,
++  0xd46a6abe, 0x8dcbcb46, 0x67bebed9, 0x7239394b,
++  0x944a4ade, 0x984c4cd4, 0xb05858e8, 0x85cfcf4a,
++  0xbbd0d06b, 0xc5efef2a, 0x4faaaae5, 0xedfbfb16,
++  0x864343c5, 0x9a4d4dd7, 0x66333355, 0x11858594,
++  0x8a4545cf, 0xe9f9f910, 0x04020206, 0xfe7f7f81,
++  0xa05050f0, 0x783c3c44, 0x259f9fba, 0x4ba8a8e3,
++  0xa25151f3, 0x5da3a3fe, 0x804040c0, 0x058f8f8a,
++  0x3f9292ad, 0x219d9dbc, 0x70383848, 0xf1f5f504,
++  0x63bcbcdf, 0x77b6b6c1, 0xafdada75, 0x42212163,
++  0x20101030, 0xe5ffff1a, 0xfdf3f30e, 0xbfd2d26d,
++  0x81cdcd4c, 0x180c0c14, 0x26131335, 0xc3ecec2f,
++  0xbe5f5fe1, 0x359797a2, 0x884444cc, 0x2e171739,
++  0x93c4c457, 0x55a7a7f2, 0xfc7e7e82, 0x7a3d3d47,
++  0xc86464ac, 0xba5d5de7, 0x3219192b, 0xe6737395,
++  0xc06060a0, 0x19818198, 0x9e4f4fd1, 0xa3dcdc7f,
++  0x44222266, 0x542a2a7e, 0x3b9090ab, 0x0b888883,
++  0x8c4646ca, 0xc7eeee29, 0x6bb8b8d3, 0x2814143c,
++  0xa7dede79, 0xbc5e5ee2, 0x160b0b1d, 0xaddbdb76,
++  0xdbe0e03b, 0x64323256, 0x743a3a4e, 0x140a0a1e,
++  0x924949db, 0x0c06060a, 0x4824246c, 0xb85c5ce4,
++  0x9fc2c25d, 0xbdd3d36e, 0x43acacef, 0xc46262a6,
++  0x399191a8, 0x319595a4, 0xd3e4e437, 0xf279798b,
++  0xd5e7e732, 0x8bc8c843, 0x6e373759, 0xda6d6db7,
++  0x018d8d8c, 0xb1d5d564, 0x9c4e4ed2, 0x49a9a9e0,
++  0xd86c6cb4, 0xac5656fa, 0xf3f4f407, 0xcfeaea25,
++  0xca6565af, 0xf47a7a8e, 0x47aeaee9, 0x10080818,
++  0x6fbabad5, 0xf0787888, 0x4a25256f, 0x5c2e2e72,
++  0x381c1c24, 0x57a6a6f1, 0x73b4b4c7, 0x97c6c651,
++  0xcbe8e823, 0xa1dddd7c, 0xe874749c, 0x3e1f1f21,
++  0x964b4bdd, 0x61bdbddc, 0x0d8b8b86, 0x0f8a8a85,
++  0xe0707090, 0x7c3e3e42, 0x71b5b5c4, 0xcc6666aa,
++  0x904848d8, 0x06030305, 0xf7f6f601, 0x1c0e0e12,
++  0xc26161a3, 0x6a35355f, 0xae5757f9, 0x69b9b9d0,
++  0x17868691, 0x99c1c158, 0x3a1d1d27, 0x279e9eb9,
++  0xd9e1e138, 0xebf8f813, 0x2b9898b3, 0x22111133,
++  0xd26969bb, 0xa9d9d970, 0x078e8e89, 0x339494a7,
++  0x2d9b9bb6, 0x3c1e1e22, 0x15878792, 0xc9e9e920,
++  0x87cece49, 0xaa5555ff, 0x50282878, 0xa5dfdf7a,
++  0x038c8c8f, 0x59a1a1f8, 0x09898980, 0x1a0d0d17,
++  0x65bfbfda, 0xd7e6e631, 0x844242c6, 0xd06868b8,
++  0x824141c3, 0x299999b0, 0x5a2d2d77, 0x1e0f0f11,
++  0x7bb0b0cb, 0xa85454fc, 0x6dbbbbd6, 0x2c16163a
++};
++
++static const unsigned char orig_Te4[256] = {
++  0x63U, 0x7cU, 0x77U, 0x7bU, 0xf2U, 0x6bU, 0x6fU, 0xc5U,
++  0x30U, 0x01U, 0x67U, 0x2bU, 0xfeU, 0xd7U, 0xabU, 0x76U,
++  0xcaU, 0x82U, 0xc9U, 0x7dU, 0xfaU, 0x59U, 0x47U, 0xf0U,
++  0xadU, 0xd4U, 0xa2U, 0xafU, 0x9cU, 0xa4U, 0x72U, 0xc0U,
++  0xb7U, 0xfdU, 0x93U, 0x26U, 0x36U, 0x3fU, 0xf7U, 0xccU,
++  0x34U, 0xa5U, 0xe5U, 0xf1U, 0x71U, 0xd8U, 0x31U, 0x15U,
++  0x04U, 0xc7U, 0x23U, 0xc3U, 0x18U, 0x96U, 0x05U, 0x9aU,
++  0x07U, 0x12U, 0x80U, 0xe2U, 0xebU, 0x27U, 0xb2U, 0x75U,
++  0x09U, 0x83U, 0x2cU, 0x1aU, 0x1bU, 0x6eU, 0x5aU, 0xa0U,
++  0x52U, 0x3bU, 0xd6U, 0xb3U, 0x29U, 0xe3U, 0x2fU, 0x84U,
++  0x53U, 0xd1U, 0x00U, 0xedU, 0x20U, 0xfcU, 0xb1U, 0x5bU,
++  0x6aU, 0xcbU, 0xbeU, 0x39U, 0x4aU, 0x4cU, 0x58U, 0xcfU,
++  0xd0U, 0xefU, 0xaaU, 0xfbU, 0x43U, 0x4dU, 0x33U, 0x85U,
++  0x45U, 0xf9U, 0x02U, 0x7fU, 0x50U, 0x3cU, 0x9fU, 0xa8U,
++  0x51U, 0xa3U, 0x40U, 0x8fU, 0x92U, 0x9dU, 0x38U, 0xf5U,
++  0xbcU, 0xb6U, 0xdaU, 0x21U, 0x10U, 0xffU, 0xf3U, 0xd2U,
++  0xcdU, 0x0cU, 0x13U, 0xecU, 0x5fU, 0x97U, 0x44U, 0x17U,
++  0xc4U, 0xa7U, 0x7eU, 0x3dU, 0x64U, 0x5dU, 0x19U, 0x73U,
++  0x60U, 0x81U, 0x4fU, 0xdcU, 0x22U, 0x2aU, 0x90U, 0x88U,
++  0x46U, 0xeeU, 0xb8U, 0x14U, 0xdeU, 0x5eU, 0x0bU, 0xdbU,
++  0xe0U, 0x32U, 0x3aU, 0x0aU, 0x49U, 0x06U, 0x24U, 0x5cU,
++  0xc2U, 0xd3U, 0xacU, 0x62U, 0x91U, 0x95U, 0xe4U, 0x79U,
++  0xe7U, 0xc8U, 0x37U, 0x6dU, 0x8dU, 0xd5U, 0x4eU, 0xa9U,
++  0x6cU, 0x56U, 0xf4U, 0xeaU, 0x65U, 0x7aU, 0xaeU, 0x08U,
++  0xbaU, 0x78U, 0x25U, 0x2eU, 0x1cU, 0xa6U, 0xb4U, 0xc6U,
++  0xe8U, 0xddU, 0x74U, 0x1fU, 0x4bU, 0xbdU, 0x8bU, 0x8aU,
++  0x70U, 0x3eU, 0xb5U, 0x66U, 0x48U, 0x03U, 0xf6U, 0x0eU,
++  0x61U, 0x35U, 0x57U, 0xb9U, 0x86U, 0xc1U, 0x1dU, 0x9eU,
++  0xe1U, 0xf8U, 0x98U, 0x11U, 0x69U, 0xd9U, 0x8eU, 0x94U,
++  0x9bU, 0x1eU, 0x87U, 0xe9U, 0xceU, 0x55U, 0x28U, 0xdfU,
++  0x8cU, 0xa1U, 0x89U, 0x0dU, 0xbfU, 0xe6U, 0x42U, 0x68U,
++  0x41U, 0x99U, 0x2dU, 0x0fU, 0xb0U, 0x54U, 0xbbU, 0x16U
++};
++
++static const unsigned int orig_rcon[] = {
++  0x01000000, 0x02000000, 0x04000000, 0x08000000,
++  0x10000000, 0x20000000, 0x40000000, 0x80000000,
++  0x1B000000, 0x36000000, /* for 128-bit blocks, Rijndael never uses more than 10 rcon values
++			   */
++};
++
++static const unsigned int orig_AES_Td[] = {
++  0x51f4a750, 0x7e416553, 0x1a17a4c3, 0x3a275e96,
++  0x3bab6bcb, 0x1f9d45f1, 0xacfa58ab, 0x4be30393,
++  0x2030fa55, 0xad766df6, 0x88cc7691, 0xf5024c25,
++  0x4fe5d7fc, 0xc52acbd7, 0x26354480, 0xb562a38f,
++  0xdeb15a49, 0x25ba1b67, 0x45ea0e98, 0x5dfec0e1,
++  0xc32f7502, 0x814cf012, 0x8d4697a3, 0x6bd3f9c6,
++  0x038f5fe7, 0x15929c95, 0xbf6d7aeb, 0x955259da,
++  0xd4be832d, 0x587421d3, 0x49e06929, 0x8ec9c844,
++  0x75c2896a, 0xf48e7978, 0x99583e6b, 0x27b971dd,
++  0xbee14fb6, 0xf088ad17, 0xc920ac66, 0x7dce3ab4,
++  0x63df4a18, 0xe51a3182, 0x97513360, 0x62537f45,
++  0xb16477e0, 0xbb6bae84, 0xfe81a01c, 0xf9082b94,
++  0x70486858, 0x8f45fd19, 0x94de6c87, 0x527bf8b7,
++  0xab73d323, 0x724b02e2, 0xe31f8f57, 0x6655ab2a,
++  0xb2eb2807, 0x2fb5c203, 0x86c57b9a, 0xd33708a5,
++  0x302887f2, 0x23bfa5b2, 0x02036aba, 0xed16825c,
++  0x8acf1c2b, 0xa779b492, 0xf307f2f0, 0x4e69e2a1,
++  0x65daf4cd, 0x0605bed5, 0xd134621f, 0xc4a6fe8a,
++  0x342e539d, 0xa2f355a0, 0x058ae132, 0xa4f6eb75,
++  0x0b83ec39, 0x4060efaa, 0x5e719f06, 0xbd6e1051,
++  0x3e218af9, 0x96dd063d, 0xdd3e05ae, 0x4de6bd46,
++  0x91548db5, 0x71c45d05, 0x0406d46f, 0x605015ff,
++  0x1998fb24, 0xd6bde997, 0x894043cc, 0x67d99e77,
++  0xb0e842bd, 0x07898b88, 0xe7195b38, 0x79c8eedb,
++  0xa17c0a47, 0x7c420fe9, 0xf8841ec9, 0x00000000,
++  0x09808683, 0x322bed48, 0x1e1170ac, 0x6c5a724e,
++  0xfd0efffb, 0x0f853856, 0x3daed51e, 0x362d3927,
++  0x0a0fd964, 0x685ca621, 0x9b5b54d1, 0x24362e3a,
++  0x0c0a67b1, 0x9357e70f, 0xb4ee96d2, 0x1b9b919e,
++  0x80c0c54f, 0x61dc20a2, 0x5a774b69, 0x1c121a16,
++  0xe293ba0a, 0xc0a02ae5, 0x3c22e043, 0x121b171d,
++  0x0e090d0b, 0xf28bc7ad, 0x2db6a8b9, 0x141ea9c8,
++  0x57f11985, 0xaf75074c, 0xee99ddbb, 0xa37f60fd,
++  0xf701269f, 0x5c72f5bc, 0x44663bc5, 0x5bfb7e34,
++  0x8b432976, 0xcb23c6dc, 0xb6edfc68, 0xb8e4f163,
++  0xd731dcca, 0x42638510, 0x13972240, 0x84c61120,
++  0x854a247d, 0xd2bb3df8, 0xaef93211, 0xc729a16d,
++  0x1d9e2f4b, 0xdcb230f3, 0x0d8652ec, 0x77c1e3d0,
++  0x2bb3166c, 0xa970b999, 0x119448fa, 0x47e96422,
++  0xa8fc8cc4, 0xa0f03f1a, 0x567d2cd8, 0x223390ef,
++  0x87494ec7, 0xd938d1c1, 0x8ccaa2fe, 0x98d40b36,
++  0xa6f581cf, 0xa57ade28, 0xdab78e26, 0x3fadbfa4,
++  0x2c3a9de4, 0x5078920d, 0x6a5fcc9b, 0x547e4662,
++  0xf68d13c2, 0x90d8b8e8, 0x2e39f75e, 0x82c3aff5,
++  0x9f5d80be, 0x69d0937c, 0x6fd52da9, 0xcf2512b3,
++  0xc8ac993b, 0x10187da7, 0xe89c636e, 0xdb3bbb7b,
++  0xcd267809, 0x6e5918f4, 0xec9ab701, 0x834f9aa8,
++  0xe6956e65, 0xaaffe67e, 0x21bccf08, 0xef15e8e6,
++  0xbae79bd9, 0x4a6f36ce, 0xea9f09d4, 0x29b07cd6,
++  0x31a4b2af, 0x2a3f2331, 0xc6a59430, 0x35a266c0,
++  0x744ebc37, 0xfc82caa6, 0xe090d0b0, 0x33a7d815,
++  0xf104984a, 0x41ecdaf7, 0x7fcd500e, 0x1791f62f,
++  0x764dd68d, 0x43efb04d, 0xccaa4d54, 0xe49604df,
++  0x9ed1b5e3, 0x4c6a881b, 0xc12c1fb8, 0x4665517f,
++  0x9d5eea04, 0x018c355d, 0xfa877473, 0xfb0b412e,
++  0xb3671d5a, 0x92dbd252, 0xe9105633, 0x6dd64713,
++  0x9ad7618c, 0x37a10c7a, 0x59f8148e, 0xeb133c89,
++  0xcea927ee, 0xb761c935, 0xe11ce5ed, 0x7a47b13c,
++  0x9cd2df59, 0x55f2733f, 0x1814ce79, 0x73c737bf,
++  0x53f7cdea, 0x5ffdaa5b, 0xdf3d6f14, 0x7844db86,
++  0xcaaff381, 0xb968c43e, 0x3824342c, 0xc2a3405f,
++  0x161dc372, 0xbce2250c, 0x283c498b, 0xff0d9541,
++  0x39a80171, 0x080cb3de, 0xd8b4e49c, 0x6456c190,
++  0x7bcb8461, 0xd532b670, 0x486c5c74, 0xd0b85742,
++};
++
++static const unsigned char orig_Td4[256] = {
++  0x52U, 0x09U, 0x6aU, 0xd5U, 0x30U, 0x36U, 0xa5U, 0x38U,
++  0xbfU, 0x40U, 0xa3U, 0x9eU, 0x81U, 0xf3U, 0xd7U, 0xfbU,
++  0x7cU, 0xe3U, 0x39U, 0x82U, 0x9bU, 0x2fU, 0xffU, 0x87U,
++  0x34U, 0x8eU, 0x43U, 0x44U, 0xc4U, 0xdeU, 0xe9U, 0xcbU,
++  0x54U, 0x7bU, 0x94U, 0x32U, 0xa6U, 0xc2U, 0x23U, 0x3dU,
++  0xeeU, 0x4cU, 0x95U, 0x0bU, 0x42U, 0xfaU, 0xc3U, 0x4eU,
++  0x08U, 0x2eU, 0xa1U, 0x66U, 0x28U, 0xd9U, 0x24U, 0xb2U,
++  0x76U, 0x5bU, 0xa2U, 0x49U, 0x6dU, 0x8bU, 0xd1U, 0x25U,
++  0x72U, 0xf8U, 0xf6U, 0x64U, 0x86U, 0x68U, 0x98U, 0x16U,
++  0xd4U, 0xa4U, 0x5cU, 0xccU, 0x5dU, 0x65U, 0xb6U, 0x92U,
++  0x6cU, 0x70U, 0x48U, 0x50U, 0xfdU, 0xedU, 0xb9U, 0xdaU,
++  0x5eU, 0x15U, 0x46U, 0x57U, 0xa7U, 0x8dU, 0x9dU, 0x84U,
++  0x90U, 0xd8U, 0xabU, 0x00U, 0x8cU, 0xbcU, 0xd3U, 0x0aU,
++  0xf7U, 0xe4U, 0x58U, 0x05U, 0xb8U, 0xb3U, 0x45U, 0x06U,
++  0xd0U, 0x2cU, 0x1eU, 0x8fU, 0xcaU, 0x3fU, 0x0fU, 0x02U,
++  0xc1U, 0xafU, 0xbdU, 0x03U, 0x01U, 0x13U, 0x8aU, 0x6bU,
++  0x3aU, 0x91U, 0x11U, 0x41U, 0x4fU, 0x67U, 0xdcU, 0xeaU,
++  0x97U, 0xf2U, 0xcfU, 0xceU, 0xf0U, 0xb4U, 0xe6U, 0x73U,
++  0x96U, 0xacU, 0x74U, 0x22U, 0xe7U, 0xadU, 0x35U, 0x85U,
++  0xe2U, 0xf9U, 0x37U, 0xe8U, 0x1cU, 0x75U, 0xdfU, 0x6eU,
++  0x47U, 0xf1U, 0x1aU, 0x71U, 0x1dU, 0x29U, 0xc5U, 0x89U,
++  0x6fU, 0xb7U, 0x62U, 0x0eU, 0xaaU, 0x18U, 0xbeU, 0x1bU,
++  0xfcU, 0x56U, 0x3eU, 0x4bU, 0xc6U, 0xd2U, 0x79U, 0x20U,
++  0x9aU, 0xdbU, 0xc0U, 0xfeU, 0x78U, 0xcdU, 0x5aU, 0xf4U,
++  0x1fU, 0xddU, 0xa8U, 0x33U, 0x88U, 0x07U, 0xc7U, 0x31U,
++  0xb1U, 0x12U, 0x10U, 0x59U, 0x27U, 0x80U, 0xecU, 0x5fU,
++  0x60U, 0x51U, 0x7fU, 0xa9U, 0x19U, 0xb5U, 0x4aU, 0x0dU,
++  0x2dU, 0xe5U, 0x7aU, 0x9fU, 0x93U, 0xc9U, 0x9cU, 0xefU,
++  0xa0U, 0xe0U, 0x3bU, 0x4dU, 0xaeU, 0x2aU, 0xf5U, 0xb0U,
++  0xc8U, 0xebU, 0xbbU, 0x3cU, 0x83U, 0x53U, 0x99U, 0x61U,
++  0x17U, 0x2bU, 0x04U, 0x7eU, 0xbaU, 0x77U, 0xd6U, 0x26U,
++  0xe1U, 0x69U, 0x14U, 0x63U, 0x55U, 0x21U, 0x0cU, 0x7dU,
++};
++
++unsigned char *AES_Te = NULL;
++unsigned char *Te4 = NULL;
++unsigned int *rcon = NULL;
++unsigned char *AES_Td = NULL;
++unsigned char *Td4 = NULL;
++
++/* to support the possibility of hosting all the tables in a specific memory
++ * location, this routine takes as input a pointer to a contiguous chunk of
++ * memory, and then fills in the tables...
++ */
++int AES_init_tables(unsigned char *buffer, size_t len)
++{
++	if (len < (2 * 1024) + (2 * 256) + 40) {
++		return 0;
++	}
++
++	memcpy(buffer, (void *)orig_AES_Te, 1024);
++	AES_Te = buffer;
++	buffer += 1024;
++	memcpy(buffer, (void *)orig_Te4, 256);
++	Te4 = buffer;
++	buffer += 256;
++	memcpy(buffer, (void *)orig_rcon, 40);
++	rcon = (unsigned int *)buffer;
++	buffer += 40;
++	memcpy(buffer, (void *)orig_AES_Td, 1024);
++	AES_Td = buffer;
++	buffer += 1024;
++	memcpy(buffer, (void *)orig_Td4, 256);
++	Td4 = buffer;
++	return 1;
++}
++
++void AES_neon_cbc_encrypt(struct aes_ctx *ctx, unsigned char *out,
++                          const unsigned char *in, size_t len,
++                          unsigned char *ivec)
++{
++	size_t n;
++	const unsigned char *iv = ivec;
++	unsigned int *key = ctx->key_enc;
++
++	while (len) {
++		for(n=0; n<16 && n<len; ++n)
++			out[n] = in[n] ^ iv[n];
++		for(; n<16; ++n)
++			out[n] = iv[n];
++		neon_AES_encrypt(out, out, key);
++		iv = out;
++		if (len<=16) break;
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++	memcpy(ivec,iv,16);
++}
++
++void AES_cbc_enc(struct aes_ctx *ctx, unsigned char *out,
++                 const unsigned char *in, size_t len, unsigned char *ivec)
++{
++	size_t n;
++	const unsigned char *iv = ivec;
++	unsigned int *key = ctx->key_enc;
++
++	while (len) {
++		for(n=0; n<16 && n<len; ++n)
++			out[n] = in[n] ^ iv[n];
++		for(; n<16; ++n)
++			out[n] = iv[n];
++		AES_encrypt(out, out, key);
++		iv = out;
++		if (len<=16) break;
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++	memcpy(ivec,iv,16);
++}
++
++void AES_neon_cbc_decrypt(struct aes_ctx *ctx, unsigned char *out,
++                          const unsigned char *in, size_t len,
++                          unsigned char *ivec)
++{
++	size_t n;
++	union { size_t align; unsigned char c[16]; } tmp;
++	unsigned int *key = ctx->key_dec;
++
++	while (len) {
++		unsigned char c;
++		neon_AES_decrypt(in, tmp.c, key);
++		for(n=0; n<16 && n<len; ++n) {
++			c = in[n];
++			out[n] = tmp.c[n] ^ ivec[n];
++			ivec[n] = c;
++		}
++		if (len<=16) {
++			for (; n<16; ++n)
++				ivec[n] = in[n];
++			break;
++		}
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++}
++
++
++void AES_cbc_dec(struct aes_ctx *ctx, unsigned char *out,
++                 const unsigned char *in, size_t len, unsigned char *ivec)
++{
++	size_t n;
++	union { size_t align; unsigned char c[16]; } tmp;
++	unsigned int *key = ctx->key_dec;
++
++	while (len) {
++		unsigned char c;
++		AES_decrypt(in, tmp.c, key);
++		for(n=0; n<16 && n<len; ++n) {
++			c = in[n];
++			out[n] = tmp.c[n] ^ ivec[n];
++			ivec[n] = c;
++		}
++		if (len<=16) {
++			for (; n<16; ++n)
++				ivec[n] = in[n];
++			break;
++		}
++		len -= 16;
++		in  += 16;
++		out += 16;
++	}
++}
++
++void AES_set_key(struct aes_ctx *ctx, const unsigned char *userKey,
++                 unsigned int key_len)
++{
++	unsigned int *key;
++	key = ctx->key_enc;
++	AES_set_encrypt_key(userKey, key);
++	key = ctx->key_dec;
++	AES_set_decrypt_key(userKey, key);
++}
++
++/**
++ * Expand the cipher key into the encryption key schedule.
++ */
++int AES_set_encrypt_key(const unsigned char *userKey, unsigned int *key)
++{
++	unsigned int *rk;
++	int i = 0;
++	unsigned int temp;
++
++	if (!userKey || !key)
++		return -1;
++
++	rk = key;
++
++	//key->rounds = 10;
++
++	rk[0] = GETU32(userKey     );
++	rk[1] = GETU32(userKey +  4);
++	rk[2] = GETU32(userKey +  8);
++	rk[3] = GETU32(userKey + 12);
++
++	while (1) {
++		temp  = rk[3];
++		rk[4] = rk[0] ^
++		        (Te4[(temp >> 16) & 0xff] << 24) ^
++		        (Te4[(temp >>  8) & 0xff] << 16) ^
++		        (Te4[(temp      ) & 0xff] << 8) ^
++		        (Te4[(temp >> 24)       ]) ^
++		        rcon[i];
++		rk[5] = rk[1] ^ rk[4];
++		rk[6] = rk[2] ^ rk[5];
++		rk[7] = rk[3] ^ rk[6];
++		if (++i == 10) {
++			break;
++		}
++		rk += 4;
++	}
++
++	return 0;
++}
++
++/**
++ * Expand the cipher key into the decryption key schedule.
++ */
++int AES_set_decrypt_key(const unsigned char *userKey, unsigned int *key)
++{
++	unsigned int *rk;
++	int i, j, status;
++	unsigned int temp;
++
++	/* First, start with an encryption schedule. */
++	status = AES_set_encrypt_key(userKey, key);
++	if (status < 0)
++		return status;
++
++	rk = key;
++
++	/* Invert the order of the round keys: */
++	for (i = 0, j = 40; i < j; i += 4, j -= 4) {
++		temp = rk[i    ]; rk[i    ] = rk[j    ]; rk[j    ] = temp;
++		temp = rk[i + 1]; rk[i + 1] = rk[j + 1]; rk[j + 1] = temp;
++		temp = rk[i + 2]; rk[i + 2] = rk[j + 2]; rk[j + 2] = temp;
++		temp = rk[i + 3]; rk[i + 3] = rk[j + 3]; rk[j + 3] = temp;
++	}
++
++	/* Apply the inverse MixColumn transform to all round keys, except for the
++	 * first and the last: */
++	for (i = 1; i < 10; i++) {
++		rk += 4;
++		for (j = 0; j < 4; j++) {
++			unsigned int tp1, tp2, tp4, tp8, tp9, tpb, tpd, tpe, m;
++
++			tp1 = rk[j];
++			m = tp1 & 0x80808080;
++			tp2 = ((tp1 & 0x7f7f7f7f) << 1) ^
++			      ((m - (m >> 7)) & 0x1b1b1b1b);
++			m = tp2 & 0x80808080;
++			tp4 = ((tp2 & 0x7f7f7f7f) << 1) ^
++			      ((m - (m >> 7)) & 0x1b1b1b1b);
++			m = tp4 & 0x80808080;
++			tp8 = ((tp4 & 0x7f7f7f7f) << 1) ^
++			      ((m - (m >> 7)) & 0x1b1b1b1b);
++			tp9 = tp8 ^ tp1;
++			tpb = tp9 ^ tp2;
++			tpd = tp9 ^ tp4;
++			tpe = tp8 ^ tp4 ^ tp2;
++			rk[j] = tpe ^ (tpd >> 16) ^ (tpd << 16) ^
++			        (tp9 >> 8) ^ (tp9 << 24) ^
++			        (tpb >> 24) ^ (tpb << 8);
++		}
++	}
++
++	return 0;
++}
+diff --git a/arch/arm/aes-openssl/aes-neon.S b/arch/arm/aes-openssl/aes-neon.S
+new file mode 100644
+index 0000000..325874d
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-neon.S
+@@ -0,0 +1,836 @@
++.text
++.code	32
++
++@ void neon_AES_encrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global neon_AES_encrypt
++.type   neon_AES_encrypt,%function
++.align	5
++neon_AES_encrypt:
++	sub	r3,pc,#8		@ neon_AES_encrypt
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr 	r10,=AES_Te
++	ldr 	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_neon_AES_encrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++	ldmia	sp!,{r4-r12,pc}
++.size	neon_AES_encrypt,.-neon_AES_encrypt
++
++.type   _neon_AES_encrypt,%function
++.align	2
++_neon_AES_encrypt:
++	str     lr,[sp,#-4]!            @ push lr
++	vmov.i64 d22, #0
++	bl	load_next_key
++	mov	r8, r7
++	mov	r7, r6
++	mov	r6, r5
++	mov	r5, r4
++	mov	r4, r8
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0,lsr#16
++	mov	r0,r0,lsr#24
++.Lenc_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Te3[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Te2[s0>>8]
++	and	r8,lr,r1
++	ldr	r6,[r10,r9,lsl#2]	@ Te1[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Te0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Te1[s1>>16]
++	ldr	r8,[r10,r8,lsl#2]	@ Te3[s1>>0]
++	ldr	r9,[r10,r9,lsl#2]	@ Te2[s1>>8]
++	eor	r0,r0,r7,ror#8
++	ldr	r1,[r10,r1,lsl#2]	@ Te0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,ror#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r6,r9,ror#8
++	and	r9,lr,r2
++	ldr	r7,[r10,r7,lsl#2]	@ Te2[s2>>8]
++	eor	r1,r1,r4,ror#24
++	ldr	r8,[r10,r8,lsl#2]	@ Te1[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te3[s2>>0]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Te0[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,ror#8
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r6,r9,ror#16
++	and	r9,lr,r3,lsr#16	@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Te3[s3>>0]
++	eor	r2,r2,r5,ror#16
++	ldr	r8,[r10,r8,lsl#2]	@ Te2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Te1[s3>>16]
++	eor	r0,r0,r7,ror#24
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Te0[s3>>24]
++	eor	r2,r2,r9,ror#8
++	eor	r3,r3,r6,ror#8
++
++	@ read next key from neon
++	mov	r11,lr
++	bl	load_next_key
++	mov	lr,r11
++	eor	r0,r0,r7
++	and	r7,lr,r0
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0,lsr#16
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Lenc_loop
++
++	add	r10,r10,#2
++
++	ldrb	r4,[r10,r7,lsl#2]	@ Te4[s0>>0]
++	and	r7,lr,r1,lsr#16	@ i0
++	ldrb	r5,[r10,r8,lsl#2]	@ Te4[s0>>8]
++	and	r8,lr,r1
++	ldrb	r6,[r10,r9,lsl#2]	@ Te4[s0>>16]
++	and	r9,lr,r1,lsr#8
++	ldrb	r0,[r10,r0,lsl#2]	@ Te4[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s1>>16]
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s1>>0]
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s1>>8]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r1,[r10,r1,lsl#2]	@ Te4[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,lsl#8
++	and	r8,lr,r2,lsr#16	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s2>>8]
++	eor	r1,r4,r1,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s2>>16]
++	mov	r2,r2,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s2>>0]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r2,[r10,r2,lsl#2]	@ Te4[s2>>24]
++	and	r7,lr,r3		@ i0
++	eor	r1,r1,r8,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,lsl#8
++	and	r9,lr,r3,lsr#16	@ i2
++	ldrb	r7,[r10,r7,lsl#2]	@ Te4[s3>>0]
++	eor	r2,r5,r2,lsl#24
++	ldrb	r8,[r10,r8,lsl#2]	@ Te4[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldrb	r9,[r10,r9,lsl#2]	@ Te4[s3>>16]
++	eor	r0,r7,r0,lsl#8
++	ldrb	r3,[r10,r3,lsl#2]	@ Te4[s3>>24]
++	eor	r1,r1,r8,lsl#8
++	eor	r2,r2,r9,lsl#16
++	eor	r3,r6,r3,lsl#24
++	bl 	load_next_key
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#2
++        ldr     pc,[sp],#4              @ pop and return
++.size	_neon_AES_encrypt,.-_neon_AES_encrypt
++
++
++.macro	copy_from_neon dreg1, dreg2
++	vmov	r7, r4, \dreg1
++	vmov	r5, r6, \dreg2
++.endm
++
++.macro	copy_to_neon dreg1, dreg2
++	vmov	\dreg1, r0, r1
++	vmov	\dreg2, r2, r3
++.endm
++
++@
++@ unsigned int fetch_key_idx(int index)
++@
++@ does not follow ARM calling conventions
++@ r11 = index (input)
++@ r0 = result (output)
++@ r1 = (temp reg, overwritten)
++@
++.global fetch_key_idx
++.type	fetch_key_idx, %function
++.align	5
++fetch_key_idx:
++	mov	r0, pc
++	add	r0, r0, #12   @ #12=3 instructions. r0 should now point to fetch_key_base
++	lsl	r1, r11, #3   @ r1 = idx * 8
++	add	r0, r0, r1    @ r0 = (idx * 8) + 12
++	mov	pc, r0
++.fetch_key_base:
++	vmov.32	r0, d0[0]
++	mov	pc, lr
++	vmov.32	r0, d0[1]
++	mov	pc, lr
++	vmov.32	r0, d1[0]
++	mov	pc, lr
++	vmov.32	r0, d1[1]
++	mov	pc, lr
++	vmov.32	r0, d2[0]
++	mov	pc, lr
++	vmov.32	r0, d2[1]
++	mov	pc, lr
++	vmov.32	r0, d3[0]
++	mov	pc, lr
++	vmov.32	r0, d3[1]
++	mov	pc, lr
++	vmov.32	r0, d4[0]
++	mov	pc, lr
++	vmov.32	r0, d4[1]
++	mov	pc, lr
++	vmov.32	r0, d5[0]
++	mov	pc, lr
++	vmov.32	r0, d5[1]
++	mov	pc, lr
++	vmov.32	r0, d6[0]
++	mov	pc, lr
++	vmov.32	r0, d6[1]
++	mov	pc, lr
++	vmov.32	r0, d7[0]
++	mov	pc, lr
++	vmov.32	r0, d7[1]
++	mov	pc, lr
++	vmov.32	r0, d8[0]
++	mov	pc, lr
++	vmov.32	r0, d8[1]
++	mov	pc, lr
++	vmov.32	r0, d9[0]
++	mov	pc, lr
++	vmov.32	r0, d9[1]
++	mov	pc, lr
++	vmov.32	r0, d10[0]
++	mov	pc, lr
++	vmov.32	r0, d10[1]
++	mov	pc, lr
++	vmov.32	r0, d11[0]
++	mov	pc, lr
++	vmov.32	r0, d11[1]
++	mov	pc, lr
++	vmov.32	r0, d12[0]
++	mov	pc, lr
++	vmov.32	r0, d12[1]
++	mov	pc, lr
++	vmov.32	r0, d13[0]
++	mov	pc, lr
++	vmov.32	r0, d13[1]
++	mov	pc, lr
++	vmov.32	r0, d14[0]
++	mov	pc, lr
++	vmov.32	r0, d14[1]
++	mov	pc, lr
++	vmov.32	r0, d15[0]
++	mov	pc, lr
++	vmov.32	r0, d15[1]
++	mov	pc, lr
++	vmov.32	r0, d16[0]
++	mov	pc, lr
++	vmov.32	r0, d16[1]
++	mov	pc, lr
++	vmov.32	r0, d17[0]
++	mov	pc, lr
++	vmov.32	r0, d17[1]
++	mov	pc, lr
++	vmov.32	r0, d18[0]
++	mov	pc, lr
++	vmov.32	r0, d18[1]
++	mov	pc, lr
++	vmov.32	r0, d19[0]
++	mov	pc, lr
++	vmov.32	r0, d19[1]
++	mov	pc, lr
++	vmov.32	r0, d20[0]
++	mov	pc, lr
++	vmov.32	r0, d20[1]
++	mov	pc, lr
++	vmov.32	r0, d21[0]
++	mov	pc, lr
++	vmov.32	r0, d21[1]
++	mov	pc, lr
++.size	fetch_key_idx,.-fetch_key_idx
++
++@
++@ unsigned int store_key_idx(int index)
++@
++@ does not follow ARM calling conventions
++@ r11 = index (input)
++@ r0 = value (input)
++@ r1,r2 = (temp regs, overwritten)
++@
++.global store_key_idx
++.type	store_key_idx, %function
++.align	5
++store_key_idx:
++	mov	r1, pc
++	add	r1, r1, #12   @ #12=3 instructions. r0 should now point to store_key_base
++	lsl	r2, r11, #3   @ r1 = idx * 8
++	add	r1, r1, r2    @ r0 = (idx * 8) + 12
++	mov	pc, r1
++.store_key_base:
++	vmov.32	d0[0], r0
++	mov	pc, lr
++	vmov.32	d0[1], r0
++	mov	pc, lr
++	vmov.32	d1[0], r0
++	mov	pc, lr
++	vmov.32	d1[1], r0
++	mov	pc, lr
++	vmov.32	d2[0], r0
++	mov	pc, lr
++	vmov.32	d2[1], r0
++	mov	pc, lr
++	vmov.32	d3[0], r0
++	mov	pc, lr
++	vmov.32	d3[1], r0
++	mov	pc, lr
++	vmov.32	d4[0], r0
++	mov	pc, lr
++	vmov.32	d4[1], r0
++	mov	pc, lr
++	vmov.32	d5[0], r0
++	mov	pc, lr
++	vmov.32	d5[1], r0
++	mov	pc, lr
++	vmov.32	d6[0], r0
++	mov	pc, lr
++	vmov.32	d6[1], r0
++	mov	pc, lr
++	vmov.32	d7[0], r0
++	mov	pc, lr
++	vmov.32	d7[1], r0
++	mov	pc, lr
++	vmov.32	d8[0], r0
++	mov	pc, lr
++	vmov.32	d8[1], r0
++	mov	pc, lr
++	vmov.32	d9[0], r0
++	mov	pc, lr
++	vmov.32	d9[1], r0
++	mov	pc, lr
++	vmov.32	d10[0], r0
++	mov	pc, lr
++	vmov.32	d10[1], r0
++	mov	pc, lr
++	vmov.32	d11[0], r0
++	mov	pc, lr
++	vmov.32	d11[1], r0
++	mov	pc, lr
++	vmov.32	d12[0], r0
++	mov	pc, lr
++	vmov.32	d12[1], r0
++	mov	pc, lr
++	vmov.32	d13[0], r0
++	mov	pc, lr
++	vmov.32	d13[1], r0
++	mov	pc, lr
++	vmov.32	d14[0], r0
++	mov	pc, lr
++	vmov.32	d14[1], r0
++	mov	pc, lr
++	vmov.32	d15[0], r0
++	mov	pc, lr
++	vmov.32	d15[1], r0
++	mov	pc, lr
++	vmov.32	d16[0], r0
++	mov	pc, lr
++	vmov.32	d16[1], r0
++	mov	pc, lr
++	vmov.32	d17[0], r0
++	mov	pc, lr
++	vmov.32	d17[1], r0
++	mov	pc, lr
++	vmov.32	d18[0], r0
++	mov	pc, lr
++	vmov.32	d18[1], r0
++	mov	pc, lr
++	vmov.32	d19[0], r0
++	mov	pc, lr
++	vmov.32	d19[1], r0
++	mov	pc, lr
++	vmov.32	d20[0], r0
++	mov	pc, lr
++	vmov.32	d20[1], r0
++	mov	pc, lr
++	vmov.32	d21[0], r0
++	mov	pc, lr
++	vmov.32	d21[1], r0
++	mov	pc, lr
++	.size	store_key_idx,.-store_key_idx
++
++@
++@ void load_next_key(int index)
++@
++@ WARNING: does not follow the ARM ABI calling conventions
++@ index is passed in to the function in d22[0]
++@ this function over-writes r4 thru r7 (and leaves it's results there)
++@
++.global	load_next_key
++.type	load_next_key, %function
++.align	5
++load_next_key:
++	mov		r4, pc
++	add		r4, r4, #36   @ #36 = 9 instructions. r4 should now point to next_key_base
++	vmov.32		r5, d22[0]
++	vmov.i32	d23,#1
++	vadd.i32	d22, d22, d23
++	mov		r6, r5
++	lsl		r5, r5, #2
++	lsl		r6, r6, #3
++	add		r6, r6, r5
++	add		r4, r4, r6
++	mov		pc, r4
++.next_key_base:
++	copy_from_neon	d0, d1
++	mov		pc, lr
++	copy_from_neon	d2, d3
++	mov		pc,lr
++	copy_from_neon	d4, d5
++	mov		pc,lr
++	copy_from_neon	d6, d7
++	mov		pc,lr
++	copy_from_neon	d8, d9
++	mov		pc,lr
++	copy_from_neon	d10, d11
++	mov		pc,lr
++	copy_from_neon	d12, d13
++	mov		pc,lr
++	copy_from_neon	d14, d15
++	mov		pc,lr
++	copy_from_neon	d16, d17
++	mov		pc,lr
++	copy_from_neon	d18, d19
++	mov		pc,lr
++	copy_from_neon	d20, d21
++	mov		pc,lr
++.size	load_next_key,.-load_next_key
++
++@
++@ void save_next_key(int idx)
++@
++@ WARNING: does not follow the ARM ABI calling conventions.
++@ input parameters are passed in using r0 thru r3. index is passed in r12.
++@ r5, r7, r8, r9 are over-written with saving by this call.
++@ this function saves values to the NEON registers.
++@
++.global	save_next_key
++.type	save_next_key, %function
++.align	5
++save_next_key:
++	mov		r5, pc
++	add		r5, r5, #28   @ #28=7 instructions. r5 should now point to save_key_base
++	rsb		r7, r12, #10  @ r7 = 10 - r12
++	mov		r8, r7
++	lsl		r7, r7, #2    @ r7 = idx * 4
++	lsl		r8, r8, #3    @ r8 = idx * 8
++	add		r8, r8, r7    @ r8 = (idx * 4) + (idx * 8)
++	add		r5, r5, r8
++	mov		pc, r5
++.save_key_base:
++	copy_to_neon	d0, d1
++	mov		pc,lr
++	copy_to_neon	d2, d3
++	mov		pc,lr
++	copy_to_neon	d4, d5
++	mov		pc,lr
++	copy_to_neon	d6, d7
++	mov		pc,lr
++	copy_to_neon	d8, d9
++	mov		pc,lr
++	copy_to_neon	d10, d11
++	mov		pc,lr
++	copy_to_neon	d12, d13
++	mov		pc,lr
++	copy_to_neon	d14, d15
++	mov		pc,lr
++	copy_to_neon	d16, d17
++	mov		pc,lr
++	copy_to_neon	d18, d19
++	mov		pc,lr
++	copy_to_neon	d20, d21
++	mov		pc,lr
++.size	save_next_key,.-save_next_key
++
++.global neon_AES_set_encrypt_key
++.type   neon_AES_set_encrypt_key,%function
++.align	5
++neon_AES_set_encrypt_key:
++	sub	r3,pc,#8		@ AES_set_encrypt_key
++	teq	r0,#0
++	moveq	r0,#-1
++	beq	.Labrt
++	teq	r2,#0
++	moveq	r0,#-1
++	beq	.Labrt
++
++	teq	r1,#128
++	movne	r0,#-1
++	bne	.Labrt
++
++.Lok:	stmdb   sp!,{r4-r12,lr}
++	ldr	r10,=AES_Te
++	ldr	r10,[r10,#0]
++	add	r10,r10,#1024
++	@sub	r10,r3,#neon_AES_set_encrypt_key-AES_Te-1024	@ Te4
++
++	mov	r12,r0		@ inp
++	mov	lr,r1			@ bits
++	mov	r11,r2			@ key
++
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	mov	r12,#10
++	str	r12,[r11,#240]
++	add	r6,r10,#256			@ rcon
++	bl	save_next_key
++	subs	r12,r12,#1
++	mov	lr,#255
++
++.L128_loop:
++	and	r5,lr,r3,lsr#24
++	and	r7,lr,r3,lsr#16
++	ldrb	r5,[r10,r5]
++	and	r8,lr,r3,lsr#8
++	ldrb	r7,[r10,r7]
++	and	r9,lr,r3
++	ldrb	r8,[r10,r8]
++	orr	r5,r5,r7,lsl#24
++	ldrb	r9,[r10,r9]
++	orr	r5,r5,r8,lsl#16
++	ldr	r4,[r6],#4			@ rcon[i++]
++	orr	r5,r5,r9,lsl#8
++	eor	r5,r5,r4
++	eor	r0,r0,r5			@ rk[4]=rk[0]^...
++	eor	r1,r1,r0			@ rk[5]=rk[1]^rk[4]
++	eor	r2,r2,r1			@ rk[6]=rk[2]^rk[5]
++	eor	r3,r3,r2			@ rk[7]=rk[3]^rk[6]
++	bl	save_next_key
++	mov	lr,#255
++	subs	r12,r12,#1
++	bpl	.L128_loop
++	mov	r2,r11
++
++.Ldone:	mov	r0,#0
++	ldmia   sp!,{r4-r12,lr}
++.Labrt:	tst	lr,#1
++	moveq	pc,lr				@ be binary compatible with V4, yet
++	.word	0xe12fff1e			@ interoperable with Thumb ISA:-)
++.size	neon_AES_set_encrypt_key,.-neon_AES_set_encrypt_key
++
++.global neon_AES_set_decrypt_key
++.type   neon_AES_set_decrypt_key,%function
++.align	5
++neon_AES_set_decrypt_key:
++	stmdb   sp!,{r4-r12,lr}
++	bl	neon_AES_set_encrypt_key
++	teq	r0,#0
++	bne	.Labrt
++
++	ldr	r12,[r2,#240]		@ AES_set_encrypt_key preserves r2,
++	mov	r11,r2			@ which is AES_KEY *key
++
++	@ reverse the order of the key schedule, using NEON
++	vmov	q11,q0
++	vmov	q0,q10
++	vmov	q10,q11
++	vmov	q11,q1
++	vmov	q1,q9
++	vmov	q9,q11
++	vmov	q11,q2
++	vmov	q2,q8
++	vmov	q8,q11
++	vmov	q11,q3
++	vmov	q3,q7
++	vmov	q7,q11
++	vmov	q11,q4
++	vmov	q4,q6
++	vmov	q6,q11
++
++	mov	r11, #4
++	@ 	index in r11, leaves result in r0, overwrites r1
++	bl	fetch_key_idx
++	@ldr	r0,[r11,#16]!		@ prefetch tp1
++	mov	r7,#0x80
++	mov	r8,#0x1b
++	orr	r7,r7,#0x8000
++	orr	r8,r8,#0x1b00
++	orr	r7,r7,r7,lsl#16
++	orr	r8,r8,r8,lsl#16
++	sub	r12,r12,#1
++	mvn	r9,r7
++	mov	r12,r12,lsl#2	@ (rounds-1)*4
++
++.Lmix:	and	r4,r0,r7
++	and	r1,r0,r9
++	sub	r4,r4,r4,lsr#7
++	and	r4,r4,r8
++	eor	r1,r4,r1,lsl#1	@ tp2
++
++	and	r4,r1,r7
++	and	r2,r1,r9
++	sub	r4,r4,r4,lsr#7
++	and	r4,r4,r8
++	eor	r2,r4,r2,lsl#1	@ tp4
++
++	and	r4,r2,r7
++	and	r3,r2,r9
++	sub	r4,r4,r4,lsr#7
++	and	r4,r4,r8
++	eor	r3,r4,r3,lsl#1	@ tp8
++
++	eor	r4,r1,r2
++	eor	r5,r0,r3		@ tp9
++	eor	r4,r4,r3		@ tpe
++	eor	r4,r4,r1,ror#24
++	eor	r4,r4,r5,ror#24	@ ^= ROTATE(tpb=tp9^tp2,8)
++	eor	r4,r4,r2,ror#16
++	eor	r4,r4,r5,ror#16	@ ^= ROTATE(tpd=tp9^tp4,16)
++	eor	r4,r4,r5,ror#8	@ ^= ROTATE(tp9,24)
++
++	@str	r4,[r11],#4
++	mov	r0, r4
++	bl	store_key_idx
++	add	r11, r11, #1
++
++	bl	fetch_key_idx
++	@ldr	r0,[r11,#4]		@ prefetch tp1
++	subs	r12,r12,#1
++	bne	.Lmix
++
++	mov	r0,#0
++	ldmia	sp!,{r4-r12,pc}
++.size	neon_AES_set_decrypt_key,.-neon_AES_set_decrypt_key
++
++@ void neon_AES_decrypt(const unsigned char *in, unsigned char *out,
++@ 		 const AES_KEY *key) {
++.global neon_AES_decrypt
++.type   neon_AES_decrypt,%function
++.align	5
++neon_AES_decrypt:
++	sub	r3,pc,#8		@ AES_decrypt
++	stmdb   sp!,{r1,r4-r12,lr}
++	mov	r12,r0		@ inp
++	mov	r11,r2
++	ldr	r10,=AES_Td
++	ldr	r10,[r10,#0]
++	ldr	r0,[r12,#0]
++	ldr	r1,[r12,#4]
++	ldr	r2,[r12,#8]
++	ldr	r3,[r12,#12]
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	bl	_neon_AES_decrypt
++
++	ldr	r12,[sp],#4		@ pop out
++	rev	r0,r0
++	rev	r1,r1
++	rev	r2,r2
++	rev	r3,r3
++	str	r0,[r12,#0]
++	str	r1,[r12,#4]
++	str	r2,[r12,#8]
++	str	r3,[r12,#12]
++
++	ldmia	sp!,{r4-r12,pc}
++.size	neon_AES_decrypt,.-neon_AES_decrypt
++
++.type   _neon_AES_decrypt,%function
++.align	2
++_neon_AES_decrypt:
++	str	lr,[sp,#-4]!		@ push lr
++	vmov.i64 d22,#0
++	bl	load_next_key
++	mov	r8, r7
++	mov     r7, r6
++	mov     r6, r5
++	mov     r5, r4
++	mov     r4, r8
++	eor	r0,r0,r4
++	mov	r12,#10
++	@ldr	r12,[r11,#240]
++	eor	r1,r1,r5
++	eor	r2,r2,r6
++	eor	r3,r3,r7
++	sub	r12,r12,#1
++	mov	lr,#255
++
++	and	r7,lr,r0,lsr#16
++	and	r8,lr,r0,lsr#8
++	and	r9,lr,r0
++	mov	r0,r0,lsr#24
++.Ldec_loop:
++	ldr	r4,[r10,r7,lsl#2]	@ Td1[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldr	r5,[r10,r8,lsl#2]	@ Td2[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldr	r6,[r10,r9,lsl#2]	@ Td3[s0>>0]
++	and	r9,lr,r1,lsr#8
++	ldr	r0,[r10,r0,lsl#2]	@ Td0[s0>>24]
++	mov	r1,r1,lsr#24
++
++	ldr	r7,[r10,r7,lsl#2]	@ Td3[s1>>0]
++	ldr	r8,[r10,r8,lsl#2]	@ Td1[s1>>16]
++	ldr	r9,[r10,r9,lsl#2]	@ Td2[s1>>8]
++	eor	r0,r0,r7,ror#24
++	ldr	r1,[r10,r1,lsl#2]	@ Td0[s1>>24]
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r8,r5,ror#8
++	and	r8,lr,r2		@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r2,lsr#16
++	ldr	r7,[r10,r7,lsl#2]	@ Td2[s2>>8]
++	eor	r1,r1,r4,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td3[s2>>0]
++	mov	r2,r2,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td1[s2>>16]
++	eor	r0,r0,r7,ror#16
++	ldr	r2,[r10,r2,lsl#2]	@ Td0[s2>>24]
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r1,r1,r8,ror#24
++	and	r8,lr,r3,lsr#8	@ i1
++	eor	r6,r9,r6,ror#8
++	and	r9,lr,r3		@ i2
++	ldr	r7,[r10,r7,lsl#2]	@ Td1[s3>>16]
++	eor	r2,r2,r5,ror#8
++	ldr	r8,[r10,r8,lsl#2]	@ Td2[s3>>8]
++	mov	r3,r3,lsr#24
++
++	ldr	r9,[r10,r9,lsl#2]	@ Td3[s3>>0]
++	eor	r0,r0,r7,ror#8
++	eor	r1,r1,r8,ror#16
++	ldr	r3,[r10,r3,lsl#2]	@ Td0[s3>>24]
++	eor	r2,r2,r9,ror#24
++	eor	r3,r3,r6,ror#8
++	@ load key
++	mov	r11, lr
++	bl	load_next_key
++	mov	lr, r11
++	eor	r0,r0,r7
++	and	r7,lr,r0,lsr#16
++	eor	r1,r1,r4
++	and	r8,lr,r0,lsr#8
++	eor	r2,r2,r5
++	and	r9,lr,r0
++	eor	r3,r3,r6
++	mov	r0,r0,lsr#24
++
++	subs	r12,r12,#1
++	bne	.Ldec_loop
++
++	add	r10,r10,#1024
++
++	ldr	r5,[r10,#0]		@ prefetch Td4
++	ldr	r6,[r10,#32]
++	ldr	r4,[r10,#64]
++	ldr	r5,[r10,#96]
++	ldr	r6,[r10,#128]
++	ldr	r4,[r10,#160]
++	ldr	r5,[r10,#192]
++	ldr	r6,[r10,#224]
++
++	ldrb	r0,[r10,r0]		@ Td4[s0>>24]
++	ldrb	r4,[r10,r7]		@ Td4[s0>>16]
++	and	r7,lr,r1		@ i0
++	ldrb	r5,[r10,r8]		@ Td4[s0>>8]
++	and	r8,lr,r1,lsr#16
++	ldrb	r6,[r10,r9]		@ Td4[s0>>0]
++	and	r9,lr,r1,lsr#8
++
++	ldrb	r7,[r10,r7]		@ Td4[s1>>0]
++	ldrb	r1,[r10,r1,lsr#24]	@ Td4[s1>>24]
++	ldrb	r8,[r10,r8]		@ Td4[s1>>16]
++	eor	r0,r7,r0,lsl#24
++	ldrb	r9,[r10,r9]		@ Td4[s1>>8]
++	eor	r1,r4,r1,lsl#8
++	and	r7,lr,r2,lsr#8	@ i0
++	eor	r5,r5,r8,lsl#8
++	and	r8,lr,r2		@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s2>>8]
++	eor	r6,r6,r9,lsl#8
++	ldrb	r8,[r10,r8]		@ Td4[s2>>0]
++	and	r9,lr,r2,lsr#16
++
++	ldrb	r2,[r10,r2,lsr#24]	@ Td4[s2>>24]
++	eor	r0,r0,r7,lsl#8
++	ldrb	r9,[r10,r9]		@ Td4[s2>>16]
++	eor	r1,r8,r1,lsl#16
++	and	r7,lr,r3,lsr#16	@ i0
++	eor	r2,r5,r2,lsl#16
++	and	r8,lr,r3,lsr#8	@ i1
++	ldrb	r7,[r10,r7]		@ Td4[s3>>16]
++	eor	r6,r6,r9,lsl#16
++	ldrb	r8,[r10,r8]		@ Td4[s3>>8]
++	and	r9,lr,r3		@ i2
++
++	ldrb	r9,[r10,r9]		@ Td4[s3>>0]
++	ldrb	r3,[r10,r3,lsr#24]	@ Td4[s3>>24]
++	eor	r0,r0,r7,lsl#16
++	eor	r1,r1,r8,lsl#8
++	eor	r2,r9,r2,lsl#8
++	eor	r3,r6,r3,lsl#24
++	bl	load_next_key
++
++	eor	r0,r0,r7
++	eor	r1,r1,r4
++	eor	r2,r2,r5
++	eor	r3,r3,r6
++
++	sub	r10,r10,#1024
++	ldr	pc,[sp],#4		@ pop and return
++.size	_neon_AES_decrypt,.-_neon_AES_decrypt
++.asciz	"AES for ARMv4, CRYPTOGAMS by <appro@openssl.org>"
++.align	2
+diff --git a/arch/arm/aes-openssl/aes-onsoc_glue.c b/arch/arm/aes-openssl/aes-onsoc_glue.c
+new file mode 100644
+index 0000000..eb45fd3
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes-onsoc_glue.c
+@@ -0,0 +1,296 @@
++/*
++ * Cryptographic API.
++ *
++ * Support for On-SoC AES.
++ */
++
++#include <linux/module.h>
++#include <linux/err.h>
++#include <linux/crypto.h>
++#include <linux/platform_device.h>
++#include <crypto/algapi.h>
++#include <crypto/aes.h>
++#include <crypto/cryptd.h>
++#include <asm/cacheflush.h>
++#include <asm/hardware/cache-l2x0.h>
++#include <asm/io.h>
++#include <mach/iomap.h>
++#include <linux/cachelock.h>
++
++void copy_into_locked(void);
++
++#define AES_STATE_SIZE (2*1024) + (2*256) + 40
++
++// Flag to allow use of cache locked memory (done by a separate driver)
++#define AESONSOC_CACHE_LOCK 1
++
++// Flag to indicate whether we're using standard openssl aes.
++// For now, we just set this at compile time.
++// XXX: In future, this should be a module option.
++static int useneon = 1;
++module_param (useneon, int, 0644);
++
++#if AESONSOC_CACHE_LOCK
++// These symbols are exported by the cache locking driver.
++static unsigned long locked_mem_addr = 0;
++static int locked_mem_size = 0;
++static void *locked_mem_area;
++#endif
++
++
++#define AES_BLOCK_MASK	(~(AES_BLOCK_SIZE-1))
++
++#include "aes.h"
++
++struct async_aes_ctx {
++	struct cryptd_ablkcipher *cryptd_tfm;
++};
++
++static inline struct crypto_aes_ctx *aes_ctx(void *raw_ctx)
++{
++	unsigned long addr = (unsigned long)raw_ctx;
++	unsigned long align = 0;
++
++	if (align <= crypto_tfm_ctx_alignment())
++		align = 1;
++	return (struct crypto_aes_ctx *)ALIGN(addr, align);
++}
++
++static u8 *saved_key;
++static unsigned int saved_key_len;
++typedef enum {NONE, ENCRYPT, DECRYPT} OP_TYPE;
++static OP_TYPE last_op = NONE;
++static unsigned int cbc_encrypt_ops = 0;
++static unsigned int cbc_decrypt_ops = 0;
++static unsigned long long cbc_encrypt_bytes = 0;
++static unsigned long long cbc_decrypt_bytes = 0;
++
++static int aes_set_key_common(struct crypto_tfm *tfm, void *raw_ctx,
++                              const u8 *in_key, unsigned int key_len,
++                              OP_TYPE operation)
++{
++	struct crypto_aes_ctx *ctx = aes_ctx(raw_ctx);
++	u32 *flags = &tfm->crt_flags;
++	int err = 0;
++
++	if (key_len != AES_KEYSIZE_128 && key_len != AES_KEYSIZE_192 &&
++	    key_len != AES_KEYSIZE_256) {
++		*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
++		return -EINVAL;
++	}
++
++	if (operation == ENCRYPT) {
++		err = AES_set_encrypt_key(in_key, ctx->key_enc);
++	} else if (operation == DECRYPT) {
++		err = AES_set_decrypt_key(in_key, ctx->key_dec);
++	} else if (operation == NONE)  {
++		AES_set_key((struct aes_ctx *)ctx, in_key, key_len);
++	} else {
++		BUG_ON(0);
++	}
++
++	return err;
++}
++
++static int aes_set_key(struct crypto_tfm *tfm, const u8 *in_key,
++                       unsigned int key_len)
++{
++	saved_key = (u8 *)in_key;
++	saved_key_len = key_len;
++
++	/* Call set key if we are using standard openssl aes. */
++	if (useneon == 0) {
++		return aes_set_key_common(tfm, crypto_tfm_ctx(tfm), in_key,
++		                          key_len, NONE);
++	}
++	return 0;
++}
++
++static int cbc_encrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
++                       struct scatterlist *src, unsigned int nbytes)
++{
++	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
++	struct crypto_tfm *tfm = &(desc->tfm->base);
++	struct blkcipher_walk walk;
++	int err;
++
++	cbc_encrypt_ops++;
++	cbc_encrypt_bytes += nbytes;
++
++	blkcipher_walk_init(&walk, dst, src, nbytes);
++	err = blkcipher_walk_virt(desc, &walk);
++	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
++
++	/* If we're using the neon version of openssl aes, then we may need to
++	 * call aes_set_key_common here... */
++	if (useneon == 1 && last_op != ENCRYPT) {
++		aes_set_key_common(tfm, crypto_tfm_ctx(tfm), saved_key,
++		                   saved_key_len, ENCRYPT);
++	}
++
++	while ((nbytes = walk.nbytes)) {
++		/* We do VFP access inside that function, and hence should
++		 * disable preemption. Note that it should be ok to call this
++		 * code on multiple cores, since each core has its own VFP. */
++		preempt_disable();
++		if (useneon == 1) {
++			AES_neon_cbc_encrypt((struct aes_ctx *)ctx,
++			                     walk.dst.virt.addr,
++			                     walk.src.virt.addr,
++			                     nbytes & AES_BLOCK_MASK, walk.iv);
++		} else {
++			AES_cbc_enc((struct aes_ctx *)ctx,
++			            walk.dst.virt.addr, walk.src.virt.addr,
++			            nbytes & AES_BLOCK_MASK, walk.iv);
++		}
++		preempt_enable();
++
++		nbytes &= AES_BLOCK_SIZE - 1;
++		err = blkcipher_walk_done(desc, &walk, nbytes);
++	}
++
++	return err;
++}
++
++static int cbc_decrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
++                       struct scatterlist *src, unsigned int nbytes)
++{
++	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
++	struct crypto_tfm *tfm = &(desc->tfm->base);
++	struct blkcipher_walk walk;
++	int err;
++
++	cbc_decrypt_ops++;
++	cbc_decrypt_bytes += nbytes;
++
++	blkcipher_walk_init(&walk, dst, src, nbytes);
++	err = blkcipher_walk_virt(desc, &walk);
++	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
++
++	/* If we're using the neon version of openssl aes, then we may need to
++	 * call aes_set_key_common here... */
++	if (useneon == 1 && last_op != DECRYPT) {
++		aes_set_key_common(tfm, crypto_tfm_ctx(tfm), saved_key,
++		                   saved_key_len, ENCRYPT);
++	}
++
++	while ((nbytes = walk.nbytes)) {
++		preempt_disable();
++		if (useneon == 1) {
++			AES_neon_cbc_decrypt((struct aes_ctx *)ctx,
++			                     walk.dst.virt.addr,
++			                     walk.src.virt.addr,
++			                     nbytes & AES_BLOCK_MASK, walk.iv);
++		} else {
++			AES_cbc_dec((struct aes_ctx *)ctx, walk.dst.virt.addr,
++			            walk.src.virt.addr, nbytes & AES_BLOCK_MASK,
++			            walk.iv);
++		}
++		preempt_enable();
++
++		nbytes &= AES_BLOCK_SIZE - 1;
++		err = blkcipher_walk_done(desc, &walk, nbytes);
++	}
++
++	return err;
++}
++
++static struct crypto_alg blk_cbc_alg = {
++	.cra_name               = "cbc(aes)",
++	.cra_driver_name        = "cbc-aes-aesonsoc",
++	.cra_priority           = 300,
++	.cra_flags              = CRYPTO_ALG_TYPE_BLKCIPHER,
++	.cra_blocksize          = AES_BLOCK_SIZE,
++	.cra_ctxsize            = sizeof(struct crypto_aes_ctx),
++	.cra_alignmask          = 3,    // We need word aligned.
++	.cra_type               = &crypto_blkcipher_type,
++	.cra_module             = THIS_MODULE,
++	.cra_list               = LIST_HEAD_INIT(blk_cbc_alg.cra_list),
++	.cra_u = {
++		.blkcipher = {
++			.min_keysize    = AES_MIN_KEY_SIZE,
++			.max_keysize    = AES_MIN_KEY_SIZE,
++			.ivsize         = AES_MIN_KEY_SIZE,
++			.setkey         = aes_set_key,
++			.encrypt        = cbc_encrypt,
++			.decrypt        = cbc_decrypt,
++		},
++	},
++};
++
++void copy_into_locked()
++{
++#if AESONSOC_CACHE_LOCK
++	if (locked_mem_size < AES_STATE_SIZE) {
++		pr_debug("aes-on-soc failure: copy_into_locked, len (%d) < " \
++		         "required state size (%d)\n", locked_mem_size,
++		         AES_STATE_SIZE);
++		return;
++	}
++
++	if (AES_init_tables(locked_mem_area, locked_mem_size) == 0) {
++		pr_debug("aes-on-soc failure: AES_init_tables failed\n");
++	}
++#else
++	int alloc_order = get_order(AES_STATE_SIZE);
++	unsigned long aes_mem_area = __get_free_pages(GFP_KERNEL, alloc_order);
++	if (aes_mem_area == 0) {
++		pr_debug("aes-on-soc failure: copy_into_locked, " \
++		         "__get_free_pages(%d) failed\n", alloc_order);
++	}
++	if (AES_init_tables(aes_mem_area, AES_STATE_SIZE) == 0) {
++		pr_debug("aes-on-soc failure: AES_init_tables failed\n");
++	}
++#endif
++
++	return;
++}
++
++static int __init aesonsoc_init(void)
++{
++	int err;
++
++	pr_debug("aes-openssl loading, use-neon = %d\n", useneon);
++#if AESONSOC_CACHE_LOCK
++	locked_mem_addr = cachelock_mem_start;
++	locked_mem_size = cachelock_mem_end - cachelock_mem_start;
++
++	locked_mem_area = (void *)locked_mem_addr;
++	pr_debug("aes-openssl loading, cache-locking = 1\n");
++#else
++	pr_debug("aes-openssl loading, cache-locking = 0\n");
++#endif
++
++	if ((err = crypto_register_alg(&blk_cbc_alg)))
++	{
++		pr_err("aes-on-soc: failed to register cbc alg\n");
++		goto blk_cbc_err;
++	}
++
++	/* Now copy all data that we want into cache locked location. */
++	copy_into_locked();
++
++	return 0;
++
++blk_cbc_err:
++	return err;
++}
++
++static void __exit aesonsoc_exit(void)
++{
++	crypto_unregister_alg(&blk_cbc_alg);
++
++	pr_debug("aes-openssl:\n");
++	pr_debug("aes-openssl cbc_encrypt_ops=%u, cbc_decrypt_ops=%u\n",
++	         cbc_encrypt_ops, cbc_decrypt_ops);
++	pr_debug("aes-openssl cbc_encrypt_bytes=%llu, cbc_decrypt_bytes=%llu\n",
++	         cbc_encrypt_bytes, cbc_decrypt_bytes);
++}
++
++module_init(aesonsoc_init);
++module_exit(aesonsoc_exit);
++
++
++MODULE_DESCRIPTION("On-SoC OpenSSL AES support. vers=1.2 (3/25/2013)");
++MODULE_ALIAS("aes");
++MODULE_ALIAS("aes-asm");
+diff --git a/arch/arm/aes-openssl/aes.h b/arch/arm/aes-openssl/aes.h
+new file mode 100644
+index 0000000..9b8d208
+--- /dev/null
++++ b/arch/arm/aes-openssl/aes.h
+@@ -0,0 +1,60 @@
++
++#define GETU32(pt) (((unsigned int)(pt)[0] << 24) ^ ((unsigned int)(pt)[1] << 16) ^ ((unsigned int)(pt)[2] <<  8) ^ ((unsigned int)(pt)[3]))
++
++// Because array size can't be a const in C, the following two are macros.
++// Both sizes are in bytes.
++#define AES_MAXNR 14
++#define AES_BLOCK_SIZE 16
++
++/* This should be a hidden type, but EVP requires that the size be known */
++struct aes_key_st {
++  unsigned int rd_key[4 *(AES_MAXNR + 1)];
++  int rounds;
++};
++typedef struct aes_key_st AES_KEY;
++
++#ifndef AES_MAX_KEYLENGTH
++#define AES_MAX_KEYLENGTH 240
++#endif
++
++#ifndef AES_MAX_KEYLENGTH_U32
++#define AES_MAX_KEYLENGTH_U32 (AES_MAX_KEYLENGTH / sizeof(unsigned int))
++#endif
++
++struct aes_ctx {
++  unsigned int key_enc[4 * (AES_MAXNR + 1)];
++  unsigned int key_dec[4 * (AES_MAXNR + 1)];
++  unsigned int key_length;
++};
++
++/* asm version of encrypt/decrypt, in aes-arm.s */
++void AES_encrypt(const unsigned char *in, unsigned char *out,
++		 const unsigned int *key);
++void AES_decrypt(const unsigned char *in, unsigned char *out,
++		 const unsigned int *key);
++
++/* neon versions of encrypt/decrypt & set key, in aes-neon.s */
++void neon_AES_encrypt(const unsigned char *in, unsigned char *out,
++		      const unsigned int *key);
++void neon_AES_decrypt(const unsigned char *in, unsigned char *out,
++		      const unsigned int *key);
++int neon_AES_set_encrypt_key(const unsigned char *userKey, int bits, struct aes_ctx *ctx);
++int neon_AES_set_decrypt_key(const unsigned char *userKey, int bits, struct aes_ctx *ctx);
++
++/* variants of set key, in aes_glue.c */
++void AES_set_key(struct aes_ctx *ctx, const unsigned char *userKey, unsigned int key_len);
++int AES_set_encrypt_key(const unsigned char *userKey, unsigned int *key);
++int AES_set_decrypt_key(const unsigned char *userKey, unsigned int *key);
++
++/* table init, in aes_glue.c */
++int AES_init_tables(unsigned char *buffer, size_t len);
++
++/* encrypt and decrypt routines, in aes_glue.c */
++void AES_neon_cbc_encrypt(struct aes_ctx *ctx, unsigned char *out,
++                          const unsigned char *in, size_t len, unsigned char *ivec);
++void AES_neon_cbc_decrypt(struct aes_ctx *ctx, unsigned char *out,
++                          const unsigned char *in, size_t len, unsigned char *ivec);
++void AES_cbc_enc(struct aes_ctx *ctx, unsigned char *out, const unsigned char *in,
++                 size_t len, unsigned char *ivec);
++void AES_cbc_dec(struct aes_ctx *ctx, unsigned char *out, const unsigned char *in,
++                 size_t len, unsigned char *ivec);
