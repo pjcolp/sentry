@@ -1,0 +1,813 @@
+diff --git a/arch/arm/Makefile b/arch/arm/Makefile
+index 70c424e..959e3c6 100644
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -259,6 +259,11 @@ drivers-$(CONFIG_OPROFILE)      += arch/arm/oprofile/
+ 
+ libs-y				:= arch/arm/lib/ $(libs-y)
+ 
++
++# Build cachelock module.
++core-m				+= arch/arm/cachelock/
++
++
+ # Default target when executing plain make
+ ifeq ($(CONFIG_XIP_KERNEL),y)
+ KBUILD_IMAGE := xipImage
+diff --git a/arch/arm/cachelock/Makefile b/arch/arm/cachelock/Makefile
+new file mode 100644
+index 0000000..501c432
+--- /dev/null
++++ b/arch/arm/cachelock/Makefile
+@@ -0,0 +1 @@
++obj-m				:= cachelock.o
+diff --git a/arch/arm/cachelock/cachelock.c b/arch/arm/cachelock/cachelock.c
+new file mode 100644
+index 0000000..334feca
+--- /dev/null
++++ b/arch/arm/cachelock/cachelock.c
+@@ -0,0 +1,513 @@
++#include <linux/module.h>
++#include <linux/err.h>
++#include <linux/crypto.h>
++#include <linux/platform_device.h>
++#include <crypto/algapi.h>
++#include <crypto/aes.h>
++#include <crypto/cryptd.h>
++#include <asm/cacheflush.h>
++#include <asm/hardware/cache-l2x0.h>
++#include <asm/io.h>
++#include <mach/iomap.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/cachelock.h>
++
++static int nways = 1; // By default lock 1 way.
++module_param (nways, int, 0644);
++
++static int touch = 1; // By default touch the data that need to be locked.
++module_param (touch, int, 0644);
++
++static int alloc_order = 1; // By default allocate 1 page.
++static int memsize = 4096;
++module_param (memsize, int, 0644);
++
++unsigned long locked_mem_area = 0;
++EXPORT_SYMBOL(locked_mem_area);
++
++struct page *locked_mem_page;
++EXPORT_SYMBOL(locked_mem_page);
++
++static int readonly = 0;
++
++int cdev_mmap(struct file *filp, struct vm_area_struct *vma);
++int cdev_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
++ssize_t cdev_write(struct file *filp, const char __user *u, size_t size, loff_t *offset);
++ssize_t cdev_read(struct file *filep, char __user *u, size_t size, loff_t *offset);
++
++struct file_operations cdev_fops = {
++	.owner = THIS_MODULE,
++	.mmap = cdev_mmap,
++	.write = cdev_write,
++	.read = cdev_read,
++};
++
++struct vm_operations_struct cdev_vm_ops = {
++	.fault = cdev_vma_fault,
++};
++
++static dev_t cdev_major;
++static struct class *cdev_class;
++
++static void access_and_lock(void *start, int len, u32 way_size, int cpu)
++{
++	int i;
++	void *data_aligned = start;
++	int len_aligned = len;
++	unsigned int temp;
++	const unsigned char default_pattern_plus1[8] = { 'H', 't', 'e', 'F',
++	                                                 'B', '7', 'z', '{' };
++	int curr_way;
++	int curr_len;
++	int curr_len_aligned;
++	u32 mask;
++	void __iomem *p;
++	unsigned int test = 0;
++
++	/* Location of PL310. */
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++
++	/* If data isn't cache line aligned, adjust len to ensure all bytes get
++	 * filled in. */
++	if (((int)data_aligned) & 0x1F) {
++		len_aligned += (((int)data_aligned) & 0x1F);
++		data_aligned = (void *)(((int)data_aligned) & ~0x1F);
++	}
++
++	/* Only touch the cache lines and fill in the random pattern if the
++	 * module parameter indicates that this should be done... */
++	if (touch == 1) {
++		curr_len = 0;
++		curr_len_aligned = 0;
++
++		for (curr_way = 0; curr_way < nways; curr_way++) {
++			/* Only open one way at a time. */
++			mask = (1 << curr_way);
++			mask = ~mask & 0xFF;
++
++			writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++			             cpu * L2X0_LOCKDOWN_STRIDE);
++
++			if (readonly) {
++				/* Use a stride less than actual cache line. */
++				for (i = 0; (i < way_size) && (curr_len < len);
++				     i++, curr_len++) {
++					temp = *(unsigned int *)(start + curr_len);
++					test += temp;
++				}
++			} else {
++				/* Fill in the random pattern. */
++				for (i = 0; (i < way_size) && (curr_len < len);
++				     i++, curr_len++) {
++					*(unsigned char *)(start + curr_len) =
++					    default_pattern_plus1[curr_len%8]-1;
++				}
++			}
++		}
++	}
++}
++
++static int __init cachelock_init(void)
++{
++	int err;
++	int i;
++	int cpu;
++	void __iomem *p;
++	u32 temp, mask;
++	u32 aux_ctrl;
++	u32 way_size;
++
++	/* Print out the module params at initialization time. */
++	pr_debug("cachelock_init: nways=%d, memsize=%d, touch=%d\n", nways,
++	         memsize, touch);
++
++	/* Allocate a memory buffer which will be locked into cache later.
++	 * Note: We assume that the buffer will be smaller than a way size and
++	 *       contiguous, so as to not cause cache line conflicts. */
++	alloc_order = get_order(memsize);
++	pr_debug("cachelock_init: Allocating 2^%d pages\n", alloc_order);
++
++	locked_mem_page = alloc_pages(GFP_KERNEL, alloc_order);
++	pr_debug("cachelock_init: Locked mem page @ 0x%p (PAGE); 0x%p (VA); " \
++	         "0x%p (PA)\n", locked_mem_page,
++	         __va(page_to_phys(locked_mem_page)),
++	         (void *)page_to_phys(locked_mem_page));
++
++	locked_mem_area = (unsigned long)__va(page_to_phys(locked_mem_page));
++	if (locked_mem_area == 0) {
++		err = -ENOMEM;
++		goto mem_alloc_err;
++	}
++
++	pr_debug("cachelock_init: Locked mem @ %p (VA) -- %p (PA)\n",
++	         (void*)locked_mem_area, (void*)__pa(locked_mem_area));
++
++	/* We also expose a char dev interface to map this memory area in
++	 * userspace. */
++	if ((cdev_major =
++	         register_chrdev(0, "cache-locked-mem", &cdev_fops)) < 0) {
++		pr_err("cachelock_init: error allocating char dev\n");
++		err = cdev_major;
++		goto mem_alloc_err;
++	}
++
++	if ((cdev_class = class_create(THIS_MODULE, "cache-locked-mem")) < 0) {
++		pr_err("cachelock_init: error creating dev class\n");
++		err = cdev_major;
++		goto class_create_err;
++	}
++
++	device_create(cdev_class, NULL, MKDEV(cdev_major, 1), NULL,
++	              "cache-locked-mem");
++
++	/* We use lockdown by master - CPU0 can use all ways, but locks data to
++	 * way 0. Other CPUs use ways other than 0.
++	 * Note: We must ensure that this code runs on CPU0 only, also we must
++	 *       ensure that all other CPUs are parked when caches are
++	 *       disabled. */
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++	pr_debug("cachelock_init: CPU [%d]\n", cpu);
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	/* This doesn't seem necessary, but spec wants it done, so... */
++	dsb();
++
++	// Set exported values
++	cachelock_force_flush = 0;
++	cachelock_mem_start = locked_mem_area;
++	cachelock_mem_end = locked_mem_area + memsize;
++	cachelock_mem_pa_start = __pa(locked_mem_area);
++	cachelock_mem_pa_end = __pa(locked_mem_area) + memsize;
++	cachelock_loaded = 1;
++
++	/* Location of the PL310. */
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++
++	aux_ctrl = readl(p + L2X0_AUX_CTRL);
++	way_size = ((aux_ctrl & L2X0_AUX_CTRL_WAY_SIZE_MASK) >> L2X0_AUX_CTRL_WAY_SIZE_SHIFT);
++
++	/* Get the way size. */
++	/* Check for corner cases. */
++	if (way_size == 0) {
++		way_size = 1;
++	} else if (way_size > 6) {
++		way_size = 6;
++	}
++	way_size = ((8 << way_size) << 10);
++	pr_debug("cachelock_init: way size = %d\n", way_size);
++
++	aux_ctrl = readl(p + L2X0_CACHE_TYPE);
++	pr_debug("cachelock_init: lockdown by master/line = 0x%x\n",
++	         ((aux_ctrl >> 25) & 3));
++
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++				i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_init: Start: Lockdown_D[%d] = %x\n", i,
++		         temp);
++	}
++
++	/* Lock data to specified ways for both data and instructions. */
++
++	/* First, disallow access for all lines other than the ones required for
++	 * this CPU. */
++	mask = (1 << nways) - 1;
++	mask = ~mask & 0xFF;
++
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++
++	/* Don't let instructions pollute our cache. */
++	mask = (1 << nways) - 1;
++	writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++
++	/* For CPUs other than the one running this code, this mask will not
++	 * change, ensuring that no line from way 0 is ever allocated to these
++	 * CPUs.
++	 * Note: We only need to worry about first 4 lock regs since our system
++	 *       is quad core, however for now we set all lock regs just to be
++	 *       sure. */
++	mask = (1 << nways) - 1;
++	for (i = 0; i < 8; i++) {
++		if (i == cpu) continue;
++		writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	dsb();
++
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_init: Before locking data: " \
++		         "Lockdown_D[%d] = %x\n", i, temp);
++	}
++
++	/* Flush again to enforce any future allocations follow our locking
++	 * scheme. */
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	/* Now access all data that we want cache locked. */
++	access_and_lock((void *)locked_mem_area, memsize, way_size, cpu);
++
++	/* This dsb ensures that any outstanding memory access is complete. */
++	dsb();
++
++	/* Now disable access to these ways from the current CPU, effectively
++	 * locking all data in it. */
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE + cpu * L2X0_LOCKDOWN_STRIDE);
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_init: After locking data: " \
++		         "Lockdown_D[%d] = %x\n", i, temp);
++	}
++
++	/* Cachelock is loaded and initialised. */
++	cachelock_loaded_done = 1;
++
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return 0;
++
++ class_create_err:
++	unregister_chrdev(cdev_major, "cache-locked-mem");
++ mem_alloc_err:
++	return err;
++}
++
++static void __exit cachelock_exit(void)
++{
++	void __iomem *p;
++	int i;
++	u32 temp;
++
++	/* Location of PL310. */
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++	for (i = 0; i < 8; i++) {
++		temp = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		pr_debug("cachelock_exit: Lockdown_D[%d] = %x\n", i, temp);
++	}
++
++	// Unlock all the ways
++	for (i = 0; i < 8; i++) {
++		writel(0x0, p + L2X0_LOCKDOWN_WAY_D_BASE +
++		            i * L2X0_LOCKDOWN_STRIDE);
++		writel(0x0, p + L2X0_LOCKDOWN_WAY_I_BASE +
++		            i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	dsb();
++
++	/* Clear the exported variables. */
++	cachelock_force_flush = 0;
++	cachelock_loaded_done = 0;
++	cachelock_loaded = 0;
++	cachelock_mem_start = 0;
++	cachelock_mem_end = 0;
++	cachelock_mem_pa_start = 0;
++	cachelock_mem_pa_end = 0;
++
++	/* Flush again to force anything in the cache out. */
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	/* Free the locked area, if needed. */
++	if (locked_mem_area != 0) {
++		free_pages(locked_mem_area, alloc_order);
++	}
++
++	/* Unregister and destroy device. */
++	unregister_chrdev(cdev_major, "cache-locked-mem");
++	device_destroy(cdev_class, MKDEV(cdev_major, 1));
++	class_destroy(cdev_class);
++}
++
++int cdev_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
++{
++	unsigned long offset;
++	unsigned long pfn;
++
++	offset = vmf->pgoff << PAGE_SHIFT;
++	if (offset >= memsize) {
++		return VM_FAULT_SIGBUS;
++	}
++
++	pfn = __pa(locked_mem_area + offset) >> PAGE_SHIFT;
++
++	vm_insert_pfn(vma, (unsigned long)(vmf->virtual_address), pfn);
++
++	return VM_FAULT_NOPAGE;
++}
++
++int cdev_mmap(struct file *filp, struct vm_area_struct *vma)
++{
++	vma->vm_ops = &cdev_vm_ops;
++	vma->vm_flags |= (VM_IO | VM_RESERVED | VM_PFNMAP | VM_DONTEXPAND);
++	return 0;
++}
++
++ssize_t cdev_write(struct file *filp, const char __user *u, size_t size, loff_t *offset)
++{
++	void __iomem *p;
++	int cpu;
++	u32 mask;
++	u32 aux_ctrl;
++	u32 way_size;
++	int i;
++
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++
++	aux_ctrl = readl(p + L2X0_AUX_CTRL);
++
++	/* Get the way size. */
++	way_size = ((aux_ctrl & L2X0_AUX_CTRL_WAY_SIZE_MASK) >>
++	            L2X0_AUX_CTRL_WAY_SIZE_SHIFT);
++
++	/* Check for corner cases. */
++	if (way_size == 0) {
++		way_size = 1;
++	} else if (way_size > 6) {
++		way_size = 6;
++	}
++	way_size = ((8 << way_size) << 10);
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	dsb();
++
++	/* Lock data to specified ways for both data and instructions. */
++	/* First, disallow access for all lines other than the ones required for
++	 * this CPU. */
++	mask = (1 << nways) - 1;
++	mask = ~mask & 0xFF;
++
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++
++	/* Don't let instructions pollute our cache. */
++	mask = (1 << nways) - 1;
++	writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++	             cpu * L2X0_LOCKDOWN_STRIDE);
++
++	/* For CPUs other than the one running this code, this mask will not
++	 * change, ensuring that no line from way 0 is ever allocated to these
++	 * CPUs.
++	 * Note: We only need to worry about first 4 lock regs since our system
++	 *       is quad core, however for now we set all lock regs just to be
++	 *       sure. */
++	mask = (1 << nways) - 1;
++	for (i = 0; i < 8; i++) {
++		if (i == cpu) continue;
++		writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++		writel(mask, p + L2X0_LOCKDOWN_WAY_I_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	dsb();
++
++	cachelock_force_flush = 1;
++
++	/* Flush again to enforce any future allocations follow our locking
++	 * scheme. */
++	flush_cache_all();
++
++	/* PL310 specific cache cleanup. */
++	outer_flush_all();
++
++	cachelock_force_flush = 0;
++
++	/* Now access all data that we want cache locked. */
++	readonly = 1;
++	access_and_lock((void *)locked_mem_area, memsize, way_size, cpu);
++	readonly = 0;
++
++	/* This dsb ensures that any outstanding memory access is complete. */
++	dsb();
++
++	/* Now disable access to these ways from the current CPU, effectively
++	 * locking all data in it. */
++	writel(mask, p + L2X0_LOCKDOWN_WAY_D_BASE +
++			cpu * L2X0_LOCKDOWN_STRIDE);
++	writel(0, p + L2X0_CACHE_SYNC);
++
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return size;
++}
++
++ssize_t cdev_read(struct file *filep, char __user *u, size_t size, loff_t *offset)
++{
++	int cpu;
++	void __iomem *p;
++	uint32_t mask;
++	unsigned i;
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	dsb();
++
++	p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++	for (i = 0; i < 8; i++) {
++		mask = readl(p + L2X0_LOCKDOWN_WAY_D_BASE +
++		             i * L2X0_LOCKDOWN_STRIDE);
++	}
++
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return 0;
++}
++
++module_init(cachelock_init);
++module_exit(cachelock_exit);
++
++MODULE_DESCRIPTION("PL310 cache locking support.");
++MODULE_LICENSE("GPL v2");
+diff --git a/arch/arm/mm/cache-l2x0.c b/arch/arm/mm/cache-l2x0.c
+index e6871a3..ea1becd 100644
+--- a/arch/arm/mm/cache-l2x0.c
++++ b/arch/arm/mm/cache-l2x0.c
+@@ -19,19 +19,111 @@
+ #include <linux/init.h>
+ #include <linux/spinlock.h>
+ #include <linux/io.h>
++#include <linux/module.h>
+ 
+ #include <asm/cacheflush.h>
+ #include <asm/hardware/cache-l2x0.h>
++#include <mach/iomap.h>
+ 
+ #define CACHE_LINE_SIZE		32
+ 
+ static void __iomem *l2x0_base;
+ static DEFINE_SPINLOCK(l2x0_lock);
+ static uint32_t l2x0_way_mask;	/* Bitmask of active ways */
++static uint32_t l2x0_def_mask;
+ static uint32_t l2x0_size;
+ static u32 l2x0_cache_id;
+ static unsigned int l2x0_sets;
+ static unsigned int l2x0_ways;
++static bool l2x0_locked_ways;
++static bool l2x0_was_locked;
++
++bool cachelock_loaded;
++EXPORT_SYMBOL(cachelock_loaded);
++bool cachelock_loaded_done;
++EXPORT_SYMBOL(cachelock_loaded_done);
++unsigned long cachelock_mem_start;
++EXPORT_SYMBOL(cachelock_mem_start);
++unsigned long cachelock_mem_end;
++EXPORT_SYMBOL(cachelock_mem_end);
++unsigned long cachelock_mem_pa_start;
++EXPORT_SYMBOL(cachelock_mem_pa_start);
++unsigned long cachelock_mem_pa_end;
++EXPORT_SYMBOL(cachelock_mem_pa_end);
++bool cachelock_force_flush;
++EXPORT_SYMBOL(cachelock_force_flush);
++
++static bool l2x0_check_cachelock_range(unsigned long start, unsigned long end)
++{
++	/* Early exit if cachelock driver isn't loaded. */
++	if (!cachelock_loaded) {
++		return 0;
++	}
++
++	/* Align start address to cache line. */
++	if (start & (CACHE_LINE_SIZE - 1)) {
++		start &= ~(CACHE_LINE_SIZE - 1);
++	}
++
++	/* Align end address to cache line. */
++	if (end & (CACHE_LINE_SIZE - 1)) {
++		end &= ~(CACHE_LINE_SIZE - 1);
++	}
++
++	/* Check if any part of the range falls within the locked region. */
++	if (((start >= cachelock_mem_pa_start) &&
++	     (start < cachelock_mem_pa_end)) ||
++	    ((end > cachelock_mem_pa_start) &&
++	     (end <= cachelock_mem_pa_end))) {
++		return 1;
++	}
++
++	return 0;
++}
++
++static inline bool l2x0_check_cachelock_line(unsigned long start)
++{
++	return l2x0_check_cachelock_range(start, start + CACHE_LINE_SIZE);
++}
++
++static inline void l2x0_set_mask(void)
++{
++	void __iomem *p;
++	uint32_t mask;
++
++	/* Early exit if the cachelock driver isn't done loading. */
++	if (!cachelock_loaded_done) {
++		l2x0_locked_ways = 0;
++		return;
++	}
++
++	l2x0_way_mask = l2x0_def_mask;
++
++	/* If we're not forcing a flush, mask out locked ways. */
++	if (likely(!cachelock_force_flush)) {
++		/* Get the lockdown mask. */
++		p = IO_ADDRESS(TEGRA_ARM_PERIF_BASE) + 0x3000;
++		mask = readl(p + L2X0_LOCKDOWN_WAY_D_BASE);
++
++		if (!mask) {
++			pr_err("l2x0_set_mask: l2x0_way_mask = %x\n",
++			       l2x0_way_mask);
++			pr_err("l2x0_set_mask: mask = %x\n", mask);
++			dump_stack();
++		}
++		/* Mask out locked ways. */
++		l2x0_way_mask &= ~mask;
++
++		/* Check if any ways are actually locked. */
++		if (l2x0_way_mask != l2x0_def_mask) {
++			l2x0_locked_ways = 1;
++		} else {
++			l2x0_locked_ways = 0;
++		}
++	} else {
++		l2x0_locked_ways = 0;
++	}
++}
+ 
+ static inline bool is_pl310_rev(int rev)
+ {
+@@ -72,6 +164,13 @@ static inline void cache_sync(void)
+ static inline void l2x0_clean_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
++
++	/* If clean includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: clean_line: locked line\n");
++		return;
++	}
++
+ 	cache_wait(base + L2X0_CLEAN_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_CLEAN_LINE_PA);
+ }
+@@ -79,6 +178,14 @@ static inline void l2x0_clean_line(unsigned long addr)
+ static inline void l2x0_inv_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
++
++	/* If invalidate includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: inv_line: locked line\n");
++		return;
++	}
++
++
+ 	cache_wait(base + L2X0_INV_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_INV_LINE_PA);
+ }
+@@ -105,6 +212,12 @@ static inline void l2x0_flush_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
+ 
++	/* If flush includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: flush_line: locked line\n");
++		return;
++	}
++
+ 	/* Clean by PA followed by Invalidate by PA */
+ 	cache_wait(base + L2X0_CLEAN_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_CLEAN_LINE_PA);
+@@ -116,6 +229,13 @@ static inline void l2x0_flush_line(unsigned long addr)
+ static inline void l2x0_flush_line(unsigned long addr)
+ {
+ 	void __iomem *base = l2x0_base;
++
++	/* If flush includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_line(addr)) {
++		pr_err("L310: flush_line: locked line\n");
++		return;
++	}
++
+ 	cache_wait(base + L2X0_CLEAN_INV_LINE_PA, 1);
+ 	writel_relaxed(addr, base + L2X0_CLEAN_INV_LINE_PA);
+ }
+@@ -213,6 +333,12 @@ static void l2x0_inv_range(unsigned long start, unsigned long end)
+ 	void __iomem *base = l2x0_base;
+ 	unsigned long flags;
+ 
++	/* If invalidate includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_range(start, end)) {
++		pr_err("L310: inv_range: locked line\n");
++		return;
++	}
++
+ 	spin_lock_irqsave(&l2x0_lock, flags);
+ 	if (start & (CACHE_LINE_SIZE - 1)) {
+ 		start &= ~(CACHE_LINE_SIZE - 1);
+@@ -252,6 +378,12 @@ static void l2x0_clean_range(unsigned long start, unsigned long end)
+ 	void __iomem *base = l2x0_base;
+ 	unsigned long flags;
+ 
++	/* If clean includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_range(start, end)) {
++		pr_err("L310: clean_range: locked line\n");
++		return;
++	}
++
+ 	if ((end - start) >= l2x0_size) {
+ 		l2x0_clean_all();
+ 		return;
+@@ -282,6 +414,12 @@ static void l2x0_flush_range(unsigned long start, unsigned long end)
+ 	void __iomem *base = l2x0_base;
+ 	unsigned long flags;
+ 
++	/* If flush includes anything that is locked, do nothing. */
++	if (l2x0_check_cachelock_range(start, end)) {
++		pr_err("L310: flush_range: locked line\n");
++		return;
++	}
++
+ 	if ((end - start) >= l2x0_size) {
+ 		l2x0_flush_all();
+ 		return;
+@@ -357,6 +495,15 @@ void l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
+ 	__u32 way_size = 0;
+ 	const char *type;
+ 
++	l2x0_was_locked = 0;
++	l2x0_locked_ways = 0;
++	cachelock_loaded = 0;
++	cachelock_loaded_done = 0;
++	cachelock_mem_start = 0;
++	cachelock_mem_end = 0;
++	cachelock_mem_pa_start = 0;
++	cachelock_mem_pa_end = 0;
++
+ 	l2x0_base = base;
+ 
+ 	l2x0_cache_id = readl_relaxed(l2x0_base + L2X0_CACHE_ID);
+@@ -387,6 +534,9 @@ void l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
+ 
+ 	l2x0_way_mask = (1 << l2x0_ways) - 1;
+ 
++	/* Get the default way mask. */
++	l2x0_def_mask = l2x0_way_mask;
++
+ 	/*
+ 	 * L2 cache Size =  Way size * Number of ways
+ 	 */
+@@ -423,6 +573,8 @@ void l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
+ 	outer_cache.set_debug = l2x0_set_debug;
+ 
+ 	pr_info_once("%s cache controller enabled\n", type);
+-	pr_info_once("l2x0: %d ways, CACHE_ID 0x%08x, AUX_CTRL 0x%08x, Cache size: %d B\n",
+-			l2x0_ways, l2x0_cache_id, aux, l2x0_size);
++	pr_info_once("l2x0: %d ways, CACHE_ID 0x%08x, AUX_CTRL 0x%08x, " \
++	             "Cache size: %d B\n", l2x0_ways, l2x0_cache_id, aux,
++	             l2x0_size);
++	pr_info_once("%s: l2x0: cachelock aware cache\n", type);
+ }
+diff --git a/include/linux/cachelock.h b/include/linux/cachelock.h
+new file mode 100644
+index 0000000..d736878
+--- /dev/null
++++ b/include/linux/cachelock.h
+@@ -0,0 +1,17 @@
++#ifndef _CACHELOCK_H
++#define _CACHELOCK_H
++
++#ifdef __KERNEL__
++#include <linux/device.h>
++
++extern bool cachelock_loaded;
++extern bool cachelock_loaded_done;
++extern unsigned long cachelock_mem_start;
++extern unsigned long cachelock_mem_end;
++extern unsigned long cachelock_mem_pa_start;
++extern unsigned long cachelock_mem_pa_end;
++extern bool cachelock_force_flush;
++
++#endif
++
++#endif
