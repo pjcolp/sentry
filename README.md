@@ -12,9 +12,9 @@ https://dl.acm.org/citation.cfm?id=2694344.2694380
 
 These patches were created on a Tegra 3 tablet running a customized version of Linux kernel version 3.1.10. To apply them, download the Linux_for_Tegra kernel tag "tegra-l4t-r16-rc" and apply the patches one by one in the following order:
 
-1. on-soc-encryption.patch
+1. cache-locking patch
 
-2. cache-locking patch
+2. on-soc-encryption.patch
 
 3. on-soc-encrypt-on-page-in-decrypt-on-page-out.patch
 
