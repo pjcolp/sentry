@@ -18,8 +18,6 @@ These patches were created on a Tegra 3 tablet running a customized version of L
 
 3. on-soc-encrypt-on-page-in-decrypt-on-page-out.patch
 
-4. dm-crypt-on-soc.patch
-
 To test the system, apply the following patch:
 
 1. user-level-on-soc-setup.patch
