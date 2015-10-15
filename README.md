@@ -22,7 +22,7 @@ To test the system, apply the following patch:
 
 1. ram2ram.patch
 
-2. user-level-on-soc-setup.patch
+There is also a "test" subdirectory which contains the "cachelock" program and a test script. This program performs a microbenchmark test on the effects of locking cacheways on memory accesses.
 
 ## License
 
