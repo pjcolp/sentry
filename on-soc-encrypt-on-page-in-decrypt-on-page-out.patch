@@ -1,0 +1,1507 @@
+diff --git a/arch/arm/cachelock/cachelock.c b/arch/arm/cachelock/cachelock.c
+index 334feca..08c8b14 100644
+--- a/arch/arm/cachelock/cachelock.c
++++ b/arch/arm/cachelock/cachelock.c
+@@ -12,6 +12,7 @@
+ #include <linux/fs.h>
+ #include <linux/mm.h>
+ #include <linux/cachelock.h>
++#include <linux/cachelock_pool.h>
+ 
+ static int nways = 1; // By default lock 1 way.
+ module_param (nways, int, 0644);
+@@ -283,6 +284,9 @@ static int __init cachelock_init(void)
+ 		         "Lockdown_D[%d] = %x\n", i, temp);
+ 	}
+ 
++	/* Initialise pool to store decrypted pages. */
++	cachelock_pool_init();
++
+ 	/* Cachelock is loaded and initialised. */
+ 	cachelock_loaded_done = 1;
+ 
+diff --git a/arch/arm/include/asm/pgtable.h b/arch/arm/include/asm/pgtable.h
+index e6d609c..d5bb478 100644
+--- a/arch/arm/include/asm/pgtable.h
++++ b/arch/arm/include/asm/pgtable.h
+@@ -173,6 +173,7 @@ extern void __pgd_error(const char *file, int line, pgd_t);
+ #define L_PTE_USER		(_AT(pteval_t, 1) << 8)
+ #define L_PTE_XN		(_AT(pteval_t, 1) << 9)
+ #define L_PTE_SHARED		(_AT(pteval_t, 1) << 10)	/* shared(v6), coherent(xsc3) */
++#define L_PTE_ENCRYPTED		(_AT(pteval_t, 1) << 11)
+ 
+ /*
+  * These are the memory types, defined to be compatible with
+@@ -410,6 +411,7 @@ static inline void set_pte_at(struct mm_struct *mm, unsigned long addr,
+ #define pte_dirty(pte)		(pte_val(pte) & L_PTE_DIRTY)
+ #define pte_young(pte)		(pte_val(pte) & L_PTE_YOUNG)
+ #define pte_exec(pte)		(!(pte_val(pte) & L_PTE_XN))
++#define pte_encrypted(pte)	(pte_val(pte) & L_PTE_ENCRYPTED)
+ #define pte_special(pte)	(0)
+ 
+ #define pte_present_user(pte) \
+@@ -425,6 +427,8 @@ PTE_BIT_FUNC(mkclean,   &= ~L_PTE_DIRTY);
+ PTE_BIT_FUNC(mkdirty,   |= L_PTE_DIRTY);
+ PTE_BIT_FUNC(mkold,     &= ~L_PTE_YOUNG);
+ PTE_BIT_FUNC(mkyoung,   |= L_PTE_YOUNG);
++PTE_BIT_FUNC(mkencrypted, |= L_PTE_ENCRYPTED);
++PTE_BIT_FUNC(mkdecrypted, &= ~L_PTE_ENCRYPTED);
+ 
+ static inline pte_t pte_mkspecial(pte_t pte) { return pte; }
+ 
+diff --git a/arch/arm/mm/Makefile b/arch/arm/mm/Makefile
+index c3ef296..e466411 100644
+--- a/arch/arm/mm/Makefile
++++ b/arch/arm/mm/Makefile
+@@ -3,7 +3,7 @@
+ #
+ 
+ obj-y				:= extable.o fault.o init.o \
+-				   iomap.o
++				   iomap.o cachelock.o memencrypt.o
+ 
+ ifeq ($(CONFIG_NON_ALIASED_COHERENT_MEM),y)
+ obj-y				+= dma-na-mapping.o
+diff --git a/arch/arm/mm/cachelock.c b/arch/arm/mm/cachelock.c
+new file mode 100644
+index 0000000..3e5113d
+--- /dev/null
++++ b/arch/arm/mm/cachelock.c
+@@ -0,0 +1,391 @@
++#include <asm/tlbflush.h>
++#include <linux/mm.h>
++#include <linux/pagemap.h>
++#include <linux/mmu_notifier.h>
++#include <linux/swap.h>
++
++#include <linux/vmalloc.h>
++#include <linux/highmem.h>
++#include <linux/list.h>
++#include <linux/rmap.h>
++#include <linux/slab.h>
++#include <linux/types.h>
++#include <linux/memencrypt.h>
++#include <linux/cachelock.h>
++#include <linux/cachelock_pool.h>
++
++static unsigned long aligned_start;
++static unsigned long aligned_end;
++static unsigned long aligned_size;
++static unsigned long aligned_pages;
++
++static cl_pool_t cl_pool;
++static cl_block_t *cl_blocks;
++
++static struct page *get_locked_page(cl_block_t *block)
++{
++	return phys_to_page(__pa(block->cl_addr));
++}
++
++static inline void release_slot(cl_pool_t *pool, cl_block_t *block)
++{
++	list_add_tail(&block->list, &pool->free_list);
++	pool->free_slots++;
++}
++
++static cl_block_t *get_slot(cl_pool_t *pool)
++{
++	cl_block_t *block;
++
++	/* If no more free slots, evict a page. */
++	/* XXX: Just evict one at a time or do it in batches? */
++	if (pool->free_slots == 0) {
++		return NULL;
++	}
++
++	/* Get next empty slot. */
++	block = list_first_entry(&pool->free_list, cl_block_t, list);
++	list_del(&block->list);
++	pool->free_slots--;
++
++	/* Initialise. */
++	block->addr = 0;
++
++	return block;
++}
++
++static int write_protect_page(struct vm_area_struct *vma, struct page *page,
++                              pte_t *orig_pte)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	unsigned long addr;
++	pte_t *ptep;
++	spinlock_t *ptl;
++	int swapped;
++	int err = -EFAULT;
++
++	/* Cache-locked page not in the VMA. */
++	addr = page_address_in_vma(page, vma);
++	if (addr == -EFAULT) {
++		pr_err("cachelock: write_protect_page: addr == -EFAULT\n");
++		goto out;
++	}
++
++	BUG_ON(PageTransCompound(page));
++	ptep = page_check_address(page, mm, addr, &ptl, 0);
++	if (!ptep) {
++		pr_err("cachelock: write_protect_page: ptep == NULL\n");
++		goto out;
++	}
++
++	if (pte_write(*ptep) || pte_dirty(*ptep)) {
++		pte_t entry;
++
++		swapped = PageSwapCache(page);
++		flush_cache_page(vma, addr, page_to_pfn(page));
++		/* OK this is tricky, when get_user_pages_fast() runs it doesn't
++		 * take any lock, therefore the check that we are going to make
++		 * with the pagecount against the mapcount is racey and
++		 * O_DIRECT can happen right after the check.
++		 * So we clear the pte and flush the tlb before the check
++		 * this assure us that no O_DIRECT can happen after the check
++		 * or in the middle of the check. */
++		entry = ptep_clear_flush(vma, addr, ptep);
++		/* Check that no O_DIRECT or similar I/O is in progress on the
++		 * page. */
++		if (page_mapcount(page) + 1 + swapped != page_count(page)) {
++			set_pte_at(mm, addr, ptep, entry);
++			goto out_unlock;
++		}
++
++		if (pte_dirty(entry)) {
++			set_page_dirty(page);
++		}
++		entry = pte_mkclean(pte_wrprotect(entry));
++		set_pte_at_notify(mm, addr, ptep, entry);
++	}
++
++	*orig_pte = *ptep;
++	err = 0;
++
++out_unlock:
++	pte_unmap_unlock(ptep, ptl);
++out:
++	return err;
++}
++
++/**
++ * replace_page - replace page in vma by new ksm page
++ * @vma:      vma that holds the pte pointing to page
++ * @page:     the page we are replacing by kpage
++ * @kpage:    the ksm page we replace page by
++ * @orig_pte: the original value of the pte
++ *
++ * Returns 0 on success, -EFAULT on failure.
++ */
++static int replace_page(struct vm_area_struct *vma, struct page *old_page,
++                        struct page *new_page, pte_t orig_pte)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *ptep;
++	spinlock_t *ptl;
++	unsigned long addr;
++	int err = -EFAULT;
++
++	addr = page_address_in_vma(old_page, vma);
++	if (addr == -EFAULT) {
++		pr_err("cachelock: replace_page: addr == -EFAULT\n");
++		goto out;
++	}
++
++	pgd = pgd_offset(mm, addr);
++	if (!pgd_present(*pgd)) {
++		pr_err("cachelock: replace_page: pgd not present\n");
++		goto out;
++	}
++
++	pud = pud_offset(pgd, addr);
++	if (!pud_present(*pud)) {
++		pr_err("cachelock: replace_page: pud not present\n");
++		goto out;
++	}
++
++	pmd = pmd_offset(pud, addr);
++	BUG_ON(pmd_trans_huge(*pmd));
++	if (!pmd_present(*pmd)) {
++		pr_err("cachelock: replace_page: pmd not present\n");
++		goto out;
++	}
++
++	ptep = pte_offset_map_lock(mm, pmd, addr, &ptl);
++	if (!pte_same(*ptep, orig_pte)) {
++		pr_err("cachelock: replace_page: ptes don't match\n");
++		pte_unmap_unlock(ptep, ptl);
++		goto out;
++	}
++
++	get_page(new_page);
++	page_add_anon_rmap(new_page, vma, addr);
++
++	flush_cache_page(vma, addr, pte_pfn(*ptep));
++	ptep_clear_flush(vma, addr, ptep);
++	set_pte_at_notify(mm, addr, ptep, mk_pte(new_page, vma->vm_page_prot));
++
++	page_remove_rmap(old_page);
++	if (!page_mapped(old_page)) {
++		try_to_free_swap(old_page);
++	}
++
++	put_page(old_page);
++
++	pte_unmap_unlock(ptep, ptl);
++	err = 0;
++out:
++	return err;
++}
++
++static struct page *remap_page(struct vm_area_struct *vma,
++                               struct page *src_page, struct page *dst_page)
++{
++	pte_t orig_pte = __pte(0);
++	struct page *page = src_page;
++	void *src_mem;
++	void *dst_mem;
++	int err;
++	unsigned long flags;
++
++	/* Lock pages. */
++	lock_page(src_page);
++	lock_page(dst_page);
++
++	/* Replace the page in the page table. */
++	if (write_protect_page(vma, src_page, &orig_pte) == 0) {
++		mark_page_accessed(dst_page);
++
++		err = replace_page(vma, src_page, dst_page, orig_pte);
++		if (err < 0) {
++			pr_err("cachelock: remap_page: replace_page failed: " \
++			       "err = %d\n", err);
++			goto out;
++		}
++
++		/* Copy page from source to destination. */
++		src_mem = kmap(src_page);
++		dst_mem = kmap(dst_page);
++		copy_page(dst_mem, src_mem);
++		memset(src_mem, 0, PAGE_SIZE);
++		kunmap(dst_page);
++		kunmap(src_page);
++
++		/* It's now safe to point to the destination page. */
++		page = dst_page;
++	} else {
++		pr_err("cachelock: remap_page: error replacing page\n");
++	}
++
++	/* Copy page flags. */
++	flags = dst_page->flags ;
++	dst_page->flags = src_page->flags;
++	src_page->flags = flags;
++
++	src_page->mapping = NULL;
++
++	unlock_page(dst_page);
++	unlock_page(src_page);
++
++out:
++	return page;
++}
++
++static struct page *cl_store_page(cl_pool_t *pool, struct mm_struct *mm,
++                                  struct vm_area_struct *vma,
++                                  struct page *memory_page)
++{
++	struct page *page = NULL;
++	unsigned long addr;
++	cl_block_t *block;
++
++	get_page(memory_page);
++
++	addr = page_address_in_vma(memory_page, vma);
++
++	/* Get a free slot (a page from the free list). */
++	block = get_slot(pool);
++	/* If we're out of pages, copy a page back out from cache-locked
++	 * memory to normal memory. */
++	if (!block) {
++		struct vm_area_struct *old_memory_vma;
++		unsigned long old_memory_addr;
++		struct page *old_memory_page;
++		struct page *locked_page;
++
++		/* Remove the first entry on the taken list. */
++		block = list_first_entry(&pool->taken_list, cl_block_t, list);
++		list_del(&block->list);
++
++		old_memory_addr = block->addr;
++		old_memory_vma = find_vma(mm, old_memory_addr);
++		old_memory_page = block->page;
++
++		locked_page = get_locked_page(block);
++
++		/* Encrypt the page. */
++		if (encrypt_page(locked_page, old_memory_addr)) {
++			pte_t *ptep;
++			pte_t pte;
++
++			ptep = vir_to_pte(mm, old_memory_addr);
++
++			/* Remap the page back to memory. */
++			page = remap_page(old_memory_vma, locked_page, old_memory_page);
++
++			/* Now that the encrypted page is back in memory,
++			 * reset it's flags and state. */
++			ptep_test_and_clear_young(old_memory_vma, old_memory_addr, ptep);
++			pte = pte_mkencrypted(*ptep);
++			set_pte_at(mm, old_memory_addr, ptep, pte);
++			flush_tlb_page(old_memory_vma, old_memory_addr);
++
++			/* If we actually remapped the page, clean up. */
++			if (page == block->page) {
++				block->page = NULL;
++				block->addr = 0;
++			}
++		} else {
++			pr_err("cachelock: cl_store_page: error encrypting\n");
++			page = memory_page;
++			goto out;
++		}
++	}
++
++	/* Remap the page to the cache-locked area. */
++	page = remap_page(vma, memory_page, get_locked_page(block));
++
++	/* If we actually remapped the page, store the original page so we
++	 * can remap back to it. */
++	if (page != memory_page) {
++		block->page = memory_page;
++		block->addr = addr;
++	}
++
++	/* Add it to the taken list. */
++	list_add_tail(&block->list, &pool->taken_list);
++
++out:
++	return page;
++}
++
++struct page *cachelock_remap_page(struct mm_struct *mm, unsigned long addr,
++                                  struct page *page)
++{
++	struct vm_area_struct *vma;
++	struct page *new_page = page;
++
++	/* Only do stuff if the cache-lock module has been loaded, otherwise
++	 * we just return the page we got (i.e., do nothing). */
++	if (cachelock_loaded) {
++		vma = find_vma(mm, addr);
++		new_page = cl_store_page(&cl_pool, mm, vma, page);
++	}
++
++	return new_page;
++}
++
++int cachelock_pool_init()
++{
++	cl_block_t *block;
++	int alloc_order;
++	struct page *cachelock_page;
++	unsigned i;
++
++	/* We don't want to overwrite the AES stuff. */
++	aligned_start = cachelock_mem_start + CACHELOCK_AES_SIZE;
++
++	/* Align start to the next page boundary. */
++	aligned_start = (aligned_start + (PAGE_SIZE-1)) & PAGE_MASK;
++
++	/* Align end to the previous page boundary. */
++	aligned_end = cachelock_mem_end & PAGE_MASK;
++
++	/* Get the number of pages available for use. */
++	aligned_size = aligned_end - aligned_start;
++	aligned_pages = aligned_size / PAGE_SIZE;
++
++	/* Get the allocation order. */
++	alloc_order = get_order(aligned_size + PAGE_SIZE);
++
++	/* Split the pages from the initial mapping. */
++	cachelock_page = phys_to_page(__pa(cachelock_mem_start));
++	split_page(cachelock_page, alloc_order);
++
++	/* Allocate the page structs. */
++	cl_blocks = kmalloc(sizeof(cl_block_t) * aligned_pages, GFP_KERNEL);
++	if (!cl_blocks) {
++		pr_err("cachelock: cachelock_remap_page: unable to allocate " \
++		       "cl_pages memory\n");
++		return -ENOMEM;
++	}
++
++	/* Initially everything is free. */
++	cl_pool.free_slots = aligned_pages;
++
++	INIT_LIST_HEAD(&cl_pool.free_list);
++	INIT_LIST_HEAD(&cl_pool.taken_list);
++
++	/* Add all new pages to the free list. */
++	for (i = 0, block = cl_blocks; i < aligned_pages; i++, block++) {
++		block->addr = 0;
++		block->cl_addr = aligned_start + (i * PAGE_SIZE);
++
++		list_add_tail(&block->list, &cl_pool.free_list);
++	}
++
++	pr_info("cachelock: pool size = 0x%lx (%ld pages)\n", aligned_size,
++	        aligned_pages);
++
++	return 0;
++}
++EXPORT_SYMBOL(cachelock_pool_init);
+diff --git a/arch/arm/mm/fault.c b/arch/arm/mm/fault.c
+index 3b5ea68..aafd831 100644
+--- a/arch/arm/mm/fault.c
++++ b/arch/arm/mm/fault.c
+@@ -19,6 +19,7 @@
+ #include <linux/sched.h>
+ #include <linux/highmem.h>
+ #include <linux/perf_event.h>
++#include <linux/memencrypt.h>
+ 
+ #include <asm/system.h>
+ #include <asm/pgtable.h>
+@@ -210,6 +211,7 @@ void do_bad_area(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ #ifdef CONFIG_MMU
+ #define VM_FAULT_BADMAP		0x010000
+ #define VM_FAULT_BADACCESS	0x020000
++#define VM_FAULT_ENCRYPTED	0x040000
+ 
+ /*
+  * Check that the permissions on the VMA allow for the fault which occurred.
+@@ -234,6 +236,38 @@ __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
+ {
+ 	struct vm_area_struct *vma;
+ 	int fault;
++	pte_t *ptep;
++	pte_t pte;
++	struct page *page;
++
++	ptep = vir_to_pte(mm, addr);
++	if (ptep == NULL) {
++		goto normal;
++	}
++
++	if (!pte_encrypted(*ptep)) {
++		goto normal;
++	}
++
++	page = pte_page(*ptep);
++	if (page == NULL) {
++		goto normal;
++	}
++
++	if (!PageEncrypted(page)) {
++		pte = pte_mkdecrypted(*ptep);
++		set_pte_at(mm, addr, ptep, pte);
++		goto normal;
++	}
++
++	if (decrypt_page(mm, addr, page)) {
++		fault = VM_FAULT_ENCRYPTED;
++		pte = pte_mkyoung(pte_mkdecrypted(*ptep));
++		set_pte_at(mm, addr, ptep, pte);
++		goto out;
++	}
++
++normal:
+ 
+ 	vma = find_vma(mm, addr);
+ 	fault = VM_FAULT_BADMAP;
+@@ -320,6 +354,10 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ 	}
+ 
+ 	fault = __do_page_fault(mm, addr, fsr, tsk);
++	if (fault & VM_FAULT_ENCRYPTED) {
++		up_read(&mm->mmap_sem);
++		return 0;
++	}
+ 	up_read(&mm->mmap_sem);
+ 
+ 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
+diff --git a/arch/arm/mm/memencrypt.c b/arch/arm/mm/memencrypt.c
+new file mode 100644
+index 0000000..6071bed
+--- /dev/null
++++ b/arch/arm/mm/memencrypt.c
+@@ -0,0 +1,711 @@
++#include <asm/tlbflush.h>
++#include <linux/crypto.h>
++#include <linux/memencrypt.h>
++#include <linux/proc_fs.h>
++#include <linux/scatterlist.h>
++#include <linux/sched.h>
++#include <linux/vmalloc.h>
++#include <linux/cachelock.h>
++#include <linux/cachelock_pool.h>
++
++struct task_struct;
++
++static const char blkcipher_alg[] = "cbc(aes)";
++static int init_blkcipher_desc(struct blkcipher_desc *desc);
++
++static void encrypt_process(pid_t pid);
++static void update_pte_task(struct task_struct *task);
++static void update_pte_vma(struct mm_struct *mm, struct vm_area_struct *vma);
++static void update_pte_vmalloc(void);
++static pte_t *virt_to_ptep_k(const unsigned long addr);
++static const char *memencrypt_vma_name(struct vm_area_struct *vma);
++
++static pid_t pid = 0;
++
++static unsigned long proc_enc_page_count = 0;
++static unsigned long memencrypt_page_count = 0;
++static unsigned long memdecrypt_page_count = 0;
++
++struct page *vir_to_page(struct mm_struct *mm, unsigned long addr)
++{
++	pte_t *ptep, pte;
++	struct page *pg;
++
++	ptep = vir_to_pte(mm, addr);
++	if (ptep == NULL) {
++		return NULL;
++	}
++
++	pte = *ptep;
++	if (pte_present(pte)) {
++		/* Only encrypt pages that are present in memory. */
++		pg = pte_page(pte);
++		return pg;
++	}
++	else {
++		return NULL;
++	}
++}
++
++pte_t *vir_to_pte(struct mm_struct *mm, unsigned long addr)
++{
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *ptep;
++
++	pgd = pgd_offset(mm, addr);
++	if (pgd_none(*pgd) || pgd_bad(*pgd)) {
++		goto err;
++	}
++
++	pud = pud_offset(pgd, addr);
++	if (pud_none(*pud) || pud_bad(*pud)) {
++		goto err;
++	}
++
++	pmd = pmd_offset(pud, addr);
++	if (pmd_none(*pmd) || pmd_bad(*pmd)) {
++		goto err;
++	}
++
++	ptep = pte_offset_map(pmd, addr);
++	if (!ptep) {
++		goto err;
++	}
++
++	return ptep;
++
++err:
++	return NULL;
++}
++
++/*
++ * Walk the kernel page table to find the pte of a kernel virtual address.
++ */
++static pte_t *virt_to_ptep_k(const unsigned long addr)
++{
++	pgd_t *pgd;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *ptep;
++
++	pgd = pgd_offset_k(addr);
++	if (pgd_none(*pgd) || pgd_bad(*pgd)) {
++		goto err;
++	}
++
++	pud = pud_offset(pgd, addr);
++	if (pud_none(*pud) || pud_bad(*pud)) {
++		goto err;
++	}
++
++	pmd = pmd_offset(pud, addr);
++	if (pmd_none(*pmd) || pmd_bad(*pmd)) {
++		goto err;
++	}
++
++	ptep = pte_offset_map(pmd, addr);
++	if (ptep == NULL) {
++		goto err;
++	}
++
++	return ptep;
++
++err:
++	return NULL;
++}
++
++static void update_pte_vma(struct mm_struct *mm, struct vm_area_struct *vma)
++{
++	unsigned long num_pages;
++	unsigned long addr;
++	struct page *page;
++	pte_t pte;
++	pte_t *ptep;
++	unsigned i;
++
++	/* Calculate the number of pages in the VMA. */
++	num_pages = (vma->vm_end - vma->vm_start) / PAGE_SIZE;
++	addr = vma->vm_start;
++	for (i = 0; i < num_pages; i++, addr += PAGE_SIZE) {
++		page = vir_to_page(mm, addr);
++		if (page == NULL) {
++			continue;
++		}
++
++		ptep = vir_to_pte(mm, addr);
++		if (ptep == NULL) {
++			continue;
++		}
++
++		if (PageEncrypted(page)) {
++			ptep_test_and_clear_young(vma, addr, ptep);
++			pte = pte_mkencrypted(*ptep);
++			set_pte_at(mm, addr, ptep, pte);
++			flush_tlb_page(vma, addr);
++		}
++	}
++}
++
++static void update_pte_task(struct task_struct *task)
++{
++	struct mm_struct *mm;
++	struct vm_area_struct *vma;
++	unsigned i;
++
++	mm = task->mm;
++	if (!mm){
++		return;
++	}
++
++	vma = mm->mmap;
++	for (i = 0; i < mm->map_count && vma != NULL; i++) {
++		update_pte_vma(mm, vma);
++		vma = vma->vm_next;
++	}
++}
++
++static void update_pte_vmalloc(void)
++{
++	unsigned long count = 0;
++	struct vm_struct *vma;
++	unsigned long pfn;
++	struct page *page;
++	pte_t *ptep;
++	pte_t pte;
++	void *addr;
++
++	read_lock(&vmlist_lock);
++	for (vma = vmlist; vma; vma = vma->next) {
++		if (vma->size == PAGE_SIZE) {
++			continue;
++		}
++
++		for (addr = vma->addr; addr < (vma->addr + vma->size - PAGE_SIZE); addr += PAGE_SIZE) {
++			if ((unsigned long)addr < VMALLOC_START) {
++				continue;
++			}
++			if ((unsigned long)addr >= VMALLOC_END) {
++				break;
++			}
++
++			ptep = virt_to_ptep_k((unsigned long)addr);
++			if ((ptep == NULL) || !pte_present(*ptep)) {
++				continue;
++			}
++
++			pfn = pte_pfn(*ptep);
++			if (!pfn_valid(pfn)) {
++				continue;
++			}
++
++			page = pte_page(*ptep);
++			if (page == NULL) {
++				continue;
++			}
++
++			if (PageEncrypted(page)) {
++				pr_debug("memencrypt: update_pte_vmalloc: " \
++				         "vmalloc PageEncrypted; pfn = %lx; "\
++				         "addr = %lx\n", page_to_pfn(page),
++				         (unsigned long)addr);
++				pte = *ptep;
++				pte = pte_mkencrypted(pte);
++				pte = pte_mkold(pte);
++				set_pte_at(&init_mm, (unsigned long)addr, ptep, pte);
++				flush_tlb_kernel_page((unsigned long)addr);
++			}
++
++			count++;
++		}
++
++	}
++	read_unlock(&vmlist_lock);
++}
++
++static int init_blkcipher_desc(struct blkcipher_desc *desc)
++{
++	const u8 key[16]= "my key";
++	const u8 iv[16]= "my iv";
++	unsigned int key_len = 16;
++	unsigned int ivsize = 16;
++	int rc;
++
++	desc->tfm = crypto_alloc_blkcipher(blkcipher_alg, 0, CRYPTO_ALG_ASYNC);
++	if (IS_ERR(desc->tfm)) {
++		pr_err("memencrypt: init_blkcipher_desc: encrypted_key: " \
++		       "failed to load %s, tfm = %ld\n", blkcipher_alg,
++		       PTR_ERR(desc->tfm));
++		return PTR_ERR(desc->tfm);
++	}
++	desc->flags = 0;
++
++	rc = crypto_blkcipher_setkey(desc->tfm, key, key_len);
++	if (rc < 0) {
++		pr_err("memencrypt: init_blkcipher_desc: failed to set key " \
++		       "(rc = %d)\n", rc);
++		crypto_free_blkcipher(desc->tfm);
++		return rc;
++	}
++	crypto_blkcipher_set_iv(desc->tfm, iv, ivsize);
++
++	return 0;
++}
++
++bool encrypt_page(struct page *page, unsigned long addr)
++{
++	struct blkcipher_desc encrypt_desc;
++	struct scatterlist sg;
++	int offset = 0;
++	int rc;
++	bool ret = true;
++
++	/* Check if the page is already enrypted. */
++	if (PageEncrypted(page) ) {
++		pr_warning("memencrypt: encrypt_page: Trying to encrypt an " \
++		           "encrypted page\n");
++		ret = false;
++		goto err;
++	}
++
++	sg_init_table(&sg, 1);
++	sg_set_page(&sg, page, PAGE_SIZE, offset);
++
++	rc = init_blkcipher_desc(&encrypt_desc);
++	if (rc < 0) {
++		pr_err("memencrypt: encrypt_page: init_blkciper_desc failed\n");
++		ret = false;
++		goto err;
++	}
++
++	/* Encrypt the page. */
++	rc = crypto_blkcipher_encrypt(&encrypt_desc, &sg, &sg, PAGE_SIZE);
++	if (rc < 0) {
++		pr_err("memencrypt: encrypt_page: crypto_blkcipher_encrypt " \
++		       "failed (%d)\n", rc);
++		ret = false;
++		goto err;
++	}
++
++	/* Mark page as encrypted. */
++	if (cachelock_loaded) {
++		SetPageEncrypted(page);
++	}
++
++	memencrypt_page_count++;
++
++err:
++	return ret;
++}
++
++void encrypt_vma(struct mm_struct *mm, struct vm_area_struct *vma)
++{
++	struct page *page;
++	pte_t *ptep;
++	pte_t pte;
++	unsigned long num_pages = 0;
++	unsigned long addr;
++	unsigned i;
++
++	/* Calculate the number of pages in the VMA. */
++	num_pages = (vma->vm_end - vma->vm_start) / PAGE_SIZE;
++
++	/* Skip CPU vector area. */
++	if (memencrypt_vma_name(vma)) {
++		pr_debug("memencrypt: encrypt_vma: [vector] vma, skipping " \
++		         "(vm_start = 0x%lx, vm_end = 0x%lx, pages = %ld)\n",
++		         vma->vm_start, vma->vm_end, num_pages);
++		return;
++	}
++
++	addr = vma->vm_start;
++	for (i = 0; i < num_pages; i++, addr += PAGE_SIZE) {
++		ptep = vir_to_pte(mm, addr);
++		if (ptep == NULL) {
++			continue;
++		}
++
++		page = vir_to_page(mm, addr);
++		if (page == NULL) {
++			continue;
++		}
++
++		/* Only encrypt pages with a count of 1 (no shared pages). */
++		if (page_count(page) > 1) {
++			continue;
++		}
++
++		/* Only encrypt pages that are mapped in. */
++		if (page_mapcount(page) <= 0) {
++			continue;
++		}
++
++		if (encrypt_page(page, addr)) {
++			ptep_test_and_clear_young(vma, addr, ptep);
++			pte = pte_mkencrypted(*ptep);
++			set_pte_at(mm, addr, ptep, pte);
++			flush_tlb_page(vma, addr);
++		}
++	}
++}
++
++void encrypt_task(struct task_struct *task)
++{
++	struct mm_struct *mm;
++	struct vm_area_struct *vma;
++	unsigned i;
++
++	mm = task->mm;
++	if (!mm){
++		return;
++	}
++
++	vma = mm->mmap;
++	for (i = 0; (i < mm->map_count) && (vma != NULL); i++) {
++		/* Only encrypt non-shared, non-reserved memory. */
++		if (!((vma->vm_flags & VM_SHARED) || (vma->vm_flags & VM_RESERVED))) {
++			encrypt_vma(mm, vma);
++		}
++		vma = vma->vm_next;
++	}
++}
++
++static void encrypt_process(pid_t pid)
++{
++	struct task_struct *target_task;
++	struct task_struct *task;
++	bool task_found = false;
++	int cpu;
++
++	memencrypt_page_count = 0;
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	/* Find the desired task. */
++	for_each_process(task) {
++		if (pid == task->pid) {
++			task_found = true;
++			target_task = task;
++			break;
++		}
++	}
++	if (!task_found) {
++		pr_err("memencrypt: encrypt_process: task [pid %d] not found\n",
++		       pid);
++		goto err;
++	}
++
++	/* Stop the task. */
++	kill_pid(task_pid(target_task), SIGSTOP, 1);
++
++	/* Encrypt the task. */
++	encrypt_task(target_task);
++
++	proc_enc_page_count = memencrypt_page_count;
++	memencrypt_page_count = 0;
++
++	/* Update vmalloc PTEs. */
++	update_pte_vmalloc();
++
++	/* Update task PTEs. */
++	for_each_process(task) {
++		update_pte_task(task);
++	}
++
++	/* Start the stopped task. */
++	kill_pid(task_pid(target_task), SIGCONT, 1);
++
++err:
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++}
++
++bool decrypt_page(struct mm_struct *mm, unsigned long addr, struct page *page)
++{
++	struct blkcipher_desc decrypt_desc;
++	struct scatterlist sg;
++	int offset = 0;
++	int rc;
++	bool ret;
++	int cpu;
++
++	/* Disable preemption. */
++	cpu = get_cpu();
++
++	/* Disable interrupts. */
++	local_irq_disable();
++
++	if (!PageEncrypted(page)) {
++		pr_warning("memencrypt: decrypt_page: trying to decrypt an " \
++		           "unencrypted page\n");
++		ret = false;
++		goto err;
++	}
++
++	/* With cache-locking, clear the page first, before we remap it. */
++	if (cachelock_loaded) {
++		ClearPageEncrypted(page);
++	}
++
++	/* Get the cache-locked copy of the page */
++	page = cachelock_remap_page(mm, addr, page);
++
++	sg_init_table(&sg, 1);
++	sg_set_page(&sg, page, PAGE_SIZE, offset);
++
++	rc = init_blkcipher_desc(&decrypt_desc);
++	if (rc < 0) {
++		pr_err("memencrypt: decrypt_page: init_blkciper_desc failed\n");
++		ret = false;
++		goto err;
++	}
++
++	/* Decrypt the page. */
++	rc = crypto_blkcipher_decrypt(&decrypt_desc, &sg, &sg, PAGE_SIZE);
++	if (rc < 0) {
++		pr_err("memencrypt: decrypt_page: crypto_blkcipher_decrypt " \
++		       "failed (%d)\n", rc);
++		ret = false;
++		goto out;
++	}
++
++	/* Unmark page as encrypted. */
++	if (!cachelock_loaded) {
++		ClearPageEncrypted(page);
++	}
++
++	/* Count the page access. */
++	memdecrypt_page_count++;
++
++out:
++	crypto_free_blkcipher(decrypt_desc.tfm);
++
++err:
++	/* Enable interrupts. */
++	local_irq_enable();
++
++	/* Enable preemption. */
++	put_cpu();
++
++	return ret;
++}
++
++void decrypt_vma(struct mm_struct *mm, struct vm_area_struct *vma)
++{
++	unsigned long num_pages = 0;
++	unsigned long addr;
++	struct page *page;
++	pte_t *ptep;
++	pte_t pte;
++	unsigned i;
++
++	/* Calculate the number of pages in the VMA. */
++	num_pages = (vma->vm_end - vma->vm_start) / PAGE_SIZE;
++
++	addr = vma->vm_start;
++	for (i = 0; i < num_pages; i++, addr += PAGE_SIZE) {
++		ptep = vir_to_pte(mm, addr);
++		if (ptep == NULL) {
++			continue;
++		}
++
++		page = vir_to_page(mm, addr);
++		if (page == NULL) {
++			continue;
++		}
++
++		if (!PageEncrypted(page)) {
++			continue;
++		}
++
++		if (decrypt_page(mm, addr, page)) {
++			pte = pte_mkdecrypted(*ptep);
++			set_pte_at(mm, addr, ptep, pte);
++			flush_tlb_page(vma, addr);
++		}
++	}
++}
++
++void decrypt_dma(struct task_struct* task)
++{
++	struct mm_struct *mm;
++	struct vm_area_struct *vma;
++	unsigned i;
++
++	mm = task->mm;
++	if (!mm){
++		return;
++	}
++
++	vma = mm->mmap;
++
++	for (i = 0; (i < mm->map_count) && (vma != NULL); i++) {
++		if (vma->vm_flags & VM_RESERVED) {
++			pr_err("memencrypt: decrypt_dma:%s  VM_RESERVED, " \
++			       "decrypt vma\n", task->comm);
++			decrypt_vma(mm, vma);
++		}
++		vma = vma->vm_next;
++	}
++}
++
++static const char *memencrypt_vma_name(struct vm_area_struct *vma)
++{
++	return (vma->vm_start == 0xffff0000) ? "[vectors]" : NULL;
++}
++
++#ifdef CONFIG_PROC_FS
++struct proc_dir_entry *base_dir;
++
++static int string_to_number(char *s)
++{
++	int r = 0;
++	int base = 0;
++	int pn = 1;
++
++	if (!strncmp(s, "-", 1)) {
++		pn = -1;
++		s++;
++	}
++	if (!strncmp(s, "0x", 2) || !strncmp(s, "0X", 2)) {
++		base = 16;
++		s += 2;
++	} else {
++		base = 10;
++	}
++
++	for (s = s; *s; s++) {
++		if ((*s >= '0') && (*s <= '9'))
++			r = (r * base) + (*s - '0');
++		else if ((*s >= 'A') && (*s <= 'F'))
++			r = (r * base) + (*s - 'A' + 10);
++		else if ((*s >= 'a') && (*s <= 'f'))
++			r = (r * base) + (*s - 'a' + 10);
++		else
++			break;
++	}
++
++	return (r * pn);
++}
++
++static int proc_write_pid(struct file *file, const char *buffer,
++                          unsigned long count, void *data)
++{
++	char *buf;
++
++	if (count < 1) {
++		return -EINVAL;
++	}
++
++	buf = kmalloc(count, GFP_KERNEL);
++	if (!buf) {
++		return -ENOMEM;
++	}
++
++	if (copy_from_user(buf, buffer, count)) {
++		kfree(buf);
++		return -EFAULT;
++	}
++
++	pid = string_to_number(buf);
++
++	encrypt_process(pid);
++
++	kfree(buf);
++	return count;
++}
++
++static int proc_write_done(struct file *file, const char *buffer,
++                           unsigned long count, void *data)
++{
++	if (count < 1) {
++		return -EINVAL;
++	}
++
++	printk("memencrypt: proc_write_done: ----- pages encrypted: "
++	       "memencrypt_page_count = %lu; size = %lu KB -----\n",
++	       memencrypt_page_count,
++	       ((memencrypt_page_count * PAGE_SIZE) / 1024));
++	printk("memencrypt: proc_write_done: ----- pages decrypted: "
++	       "memdecrypt_page_count = %lu; size = %lu KB -----\n",
++	       memdecrypt_page_count,
++	       ((memdecrypt_page_count * PAGE_SIZE) / 1024));
++
++	return count;
++}
++
++static int proc_read_done(char *page, char **start, off_t off, int count,
++                          int *eof, void *data)
++{
++	*eof = 1;
++
++	return sprintf(page,
++	               "proc pages encrypted: count = %lu; size = %lu KB\n" \
++	               "pages encrypted: count = %lu; size = %lu KB\n" \
++	               "pages decrypted: count = %lu; size = %lu KB\n",
++	               proc_enc_page_count,
++	               ((proc_enc_page_count * PAGE_SIZE) / 1024),
++	               memencrypt_page_count,
++	               ((memencrypt_page_count * PAGE_SIZE) / 1024),
++	               memdecrypt_page_count,
++	               ((memdecrypt_page_count * PAGE_SIZE) / 1024));
++}
++
++static int proc_read_pid(char *page, char **start, off_t off, int count,
++                         int *eof, void *data)
++{
++	*eof = 1;
++	return sprintf(page, "Process: %d\n", pid);
++}
++#endif /* CONFIG_PROC_FS */
++
++
++static int __init memencrypt_init(void)
++{
++#ifdef CONFIG_PROC_FS
++	struct proc_dir_entry *ent;
++
++	base_dir = proc_mkdir("memencrypt", NULL);
++	if (base_dir == NULL) {
++		pr_err("memencrypt: memencrypt_init: unable to create " \
++		       "/proc/memencrypt directory\n");
++		return -ENOMEM;
++	}
++
++	/* Create pid proc entry. */
++	ent = create_proc_entry("pid", S_IRUGO | S_IWUGO, base_dir);
++
++	if (!ent) {
++		return -ENOMEM;
++	}
++
++	ent->read_proc = proc_read_pid;
++	ent->write_proc = proc_write_pid;
++
++	/* Create done proc entry*/
++	ent = create_proc_entry("done", S_IRUGO | S_IWUGO, base_dir);
++
++	if (!ent) {
++		return -ENOMEM;
++	}
++
++	ent->read_proc = proc_read_done;
++	ent->write_proc = proc_write_done;
++
++	pr_info("memencrypt: created proc file\n");
++#endif /* CONFIG_PROC_FS */
++
++	pr_info("memencrypt: init done\n");
++
++	return 0;
++}
++
++early_initcall(memencrypt_init);
+diff --git a/include/asm-generic/pgtable.h b/include/asm-generic/pgtable.h
+index 76bff2b..e3389f5 100644
+--- a/include/asm-generic/pgtable.h
++++ b/include/asm-generic/pgtable.h
+@@ -18,6 +18,8 @@ extern int pmdp_set_access_flags(struct vm_area_struct *vma,
+ 				 pmd_t entry, int dirty);
+ #endif
+ 
++extern pte_t ptep_test_and_set_encrypted(pte_t pte);
++
+ #ifndef __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
+ static inline int ptep_test_and_clear_young(struct vm_area_struct *vma,
+ 					    unsigned long address,
+diff --git a/include/linux/cachelock_pool.h b/include/linux/cachelock_pool.h
+new file mode 100644
+index 0000000..3fe27ec
+--- /dev/null
++++ b/include/linux/cachelock_pool.h
+@@ -0,0 +1,24 @@
++#ifndef _CACHELOCK_POOL_H
++#define _CACHELOCK_POOL_H
++
++#define CACHELOCK_AES_SIZE	((2 * 1024) + (2 * 256) + 40)
++
++typedef struct cl_block {
++	struct list_head list;
++	unsigned long addr;     /* Where it is in normal memory. */
++	unsigned long cl_addr;  /* Where it is in the cache-locked memory. */
++	struct page *page;      /* The original page struct. */
++	pte_t pte;
++} cl_block_t;
++
++typedef struct cl_pool {
++	unsigned free_slots;
++	struct list_head free_list;
++	struct list_head taken_list;
++} cl_pool_t;
++
++int cachelock_pool_init(void);
++struct page *cachelock_remap_page(struct mm_struct *mm, unsigned long addr,
++                                  struct page *page);
++
++#endif
+diff --git a/include/linux/memencrypt.h b/include/linux/memencrypt.h
+new file mode 100644
+index 0000000..91fbabf
+--- /dev/null
++++ b/include/linux/memencrypt.h
+@@ -0,0 +1,12 @@
++#ifndef MEMENCRYPT_H
++#define MEMENCRYPT_H
++
++void decrypt_dma(struct task_struct* task);
++void decrypt_vma(struct mm_struct *mm, struct vm_area_struct *vma);
++bool decrypt_page(struct mm_struct *mm, unsigned long addr, struct page *page);
++
++bool encrypt_page(struct page *page, unsigned long addr);
++
++pte_t *vir_to_pte(struct mm_struct *mm, unsigned long addr);
++
++#endif
+diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
+index e90a673..9722f4a 100644
+--- a/include/linux/page-flags.h
++++ b/include/linux/page-flags.h
+@@ -107,6 +107,7 @@ enum pageflags {
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+ 	PG_compound_lock,
+ #endif
++	PG_encrypted,		/* Page is encrypted */
+ 	__NR_PAGEFLAGS,
+ 
+ 	/* Filesystems */
+@@ -206,6 +207,8 @@ PAGEFLAG(Pinned, pinned) TESTSCFLAG(Pinned, pinned)	/* Xen */
+ PAGEFLAG(SavePinned, savepinned);			/* Xen */
+ PAGEFLAG(Reserved, reserved) __CLEARPAGEFLAG(Reserved, reserved)
+ PAGEFLAG(SwapBacked, swapbacked) __CLEARPAGEFLAG(SwapBacked, swapbacked)
++PAGEFLAG(Encrypted, encrypted) TESTSCFLAG(Encrypted, encrypted)
++	__CLEARPAGEFLAG(Encrypted, encrypted)
+ 
+ __PAGEFLAG(SlobFree, slob_free)
+ 
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index c9e03a9..15214a8 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1760,7 +1760,12 @@ extern int task_free_unregister(struct notifier_block *n);
+ /*
+  * Per process flags
+  */
++#if 0
+ #define PF_STARTING	0x00000002	/* being created */
++#else
++/* There are no more flags, so steal one. */
++#define PF_ENCRYPTED	0x00000002	/* Process memory is encrypted */
++#endif
+ #define PF_EXITING	0x00000004	/* getting shut down */
+ #define PF_EXITPIDONE	0x00000008	/* pi exit done on shut down */
+ #define PF_VCPU		0x00000010	/* I'm a virtual CPU */
+diff --git a/kernel/fork.c b/kernel/fork.c
+index f65fa06..bc628ae 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1014,7 +1014,10 @@ static void copy_flags(unsigned long clone_flags, struct task_struct *p)
+ 
+ 	new_flags &= ~(PF_SUPERPRIV | PF_WQ_WORKER);
+ 	new_flags |= PF_FORKNOEXEC;
++#if 0
++	/* Remove references to starting flag when using encryption. */
+ 	new_flags |= PF_STARTING;
++#endif
+ 	p->flags = new_flags;
+ 	clear_freeze_flag(p);
+ }
+@@ -1557,7 +1560,10 @@ long do_fork(unsigned long clone_flags,
+ 		 * hasn't finished SIGSTOP raising yet.  Now we clear it
+ 		 * and set the child going.
+ 		 */
++#if 0
++		/* Remove references to starting flag when using encryption. */
+ 		p->flags &= ~PF_STARTING;
++#endif
+ 
+ 		wake_up_new_task(p);
+ 
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 0eedbf8..903744a 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -34,6 +34,7 @@
+ #include <linux/hardirq.h> /* for BUG_ON(!in_atomic()) only */
+ #include <linux/memcontrol.h>
+ #include <linux/cleancache.h>
++#include <linux/memencrypt.h>
+ #include "internal.h"
+ 
+ /*
+@@ -1310,6 +1311,11 @@ int file_read_actor(read_descriptor_t *desc, struct page *page,
+ 	char *kaddr;
+ 	unsigned long left, count = desc->count;
+ 
++	if (PageEncrypted(page)) {
++		pr_err("filemap: file_read_actor: %s: page encrypted pfn %lu\n",
++		       current->comm, page_to_pfn(page));
++	}
++
+ 	if (size > count)
+ 		size = count;
+ 
+diff --git a/mm/memory.c b/mm/memory.c
+index b2b8731..0d1dde8 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -52,6 +52,7 @@
+ #include <linux/init.h>
+ #include <linux/writeback.h>
+ #include <linux/memcontrol.h>
++#include <linux/memencrypt.h>
+ #include <linux/mmu_notifier.h>
+ #include <linux/kallsyms.h>
+ #include <linux/swapops.h>
+@@ -886,6 +887,7 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+ 				 */
+ 				make_migration_entry_read(&entry);
+ 				pte = swp_entry_to_pte(entry);
++				pte = ptep_test_and_set_encrypted(pte);
+ 				set_pte_at(src_mm, addr, src_pte, pte);
+ 			}
+ 		}
+@@ -3112,6 +3114,7 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	inc_mm_counter_fast(mm, MM_ANONPAGES);
+ 	page_add_new_anon_rmap(page, vma, address);
+ setpte:
++	entry = ptep_test_and_set_encrypted(entry);
+ 	set_pte_at(mm, address, page_table, entry);
+ 
+ 	/* No need to invalidate - it was non-present before */
+@@ -3274,6 +3277,7 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 				get_page(dirty_page);
+ 			}
+ 		}
++		entry = ptep_test_and_set_encrypted(entry);
+ 		set_pte_at(mm, address, page_table, entry);
+ 
+ 		/* no need to invalidate: a not-present page won't be cached */
+@@ -3794,6 +3798,10 @@ static int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
+ 			if (bytes > PAGE_SIZE-offset)
+ 				bytes = PAGE_SIZE-offset;
+ 
++			if (PageEncrypted(page)) {
++				decrypt_page(mm, addr, page);
++			}
++
+ 			maddr = kmap(page);
+ 			if (write) {
+ 				copy_to_user_page(vma, page, addr,
+diff --git a/mm/mprotect.c b/mm/mprotect.c
+index 5a688a2..90087bd 100644
+--- a/mm/mprotect.c
++++ b/mm/mprotect.c
+@@ -15,6 +15,7 @@
+ #include <linux/fs.h>
+ #include <linux/highmem.h>
+ #include <linux/security.h>
++#include <linux/memencrypt.h>
+ #include <linux/mempolicy.h>
+ #include <linux/personality.h>
+ #include <linux/syscalls.h>
+@@ -59,6 +60,7 @@ static void change_pte_range(struct mm_struct *mm, pmd_t *pmd,
+ 			if (dirty_accountable && pte_dirty(ptent))
+ 				ptent = pte_mkwrite(ptent);
+ 
++			ptent = ptep_test_and_set_encrypted(ptent);
+ 			ptep_modify_prot_commit(mm, addr, pte, ptent);
+ 		} else if (PAGE_MIGRATION && !pte_file(oldpte)) {
+ 			swp_entry_t entry = pte_to_swp_entry(oldpte);
+@@ -68,9 +70,11 @@ static void change_pte_range(struct mm_struct *mm, pmd_t *pmd,
+ 				 * A protection check is difficult so
+ 				 * just be safe and disable write
+ 				 */
++				pte_t p;
+ 				make_migration_entry_read(&entry);
+-				set_pte_at(mm, addr, pte,
+-					swp_entry_to_pte(entry));
++				p = swp_entry_to_pte(entry);
++				p = ptep_test_and_set_encrypted(p);
++				set_pte_at(mm, addr, pte, p);
+ 			}
+ 		}
+ 	} while (pte++, addr += PAGE_SIZE, addr != end);
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 8859578..43b4e01 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -5794,6 +5794,7 @@ static struct trace_print_flags pageflag_names[] = {
+ #ifdef CONFIG_MMU
+ 	{1UL << PG_mlocked,		"mlocked"	},
+ #endif
++	{1UL << PG_encrypted,		"encrypted"	},
+ #ifdef CONFIG_ARCH_USES_PG_UNCACHED
+ 	{1UL << PG_uncached,		"uncached"	},
+ #endif
+diff --git a/mm/pgtable-generic.c b/mm/pgtable-generic.c
+index eb663fb..329a6e9 100644
+--- a/mm/pgtable-generic.c
++++ b/mm/pgtable-generic.c
+@@ -119,3 +119,12 @@ pmd_t pmdp_splitting_flush(struct vm_area_struct *vma, unsigned long address,
+ }
+ #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
+ #endif
++
++pte_t ptep_test_and_set_encrypted(pte_t pte)
++{
++	if (PageEncrypted(pte_page(pte)) && !pte_encrypted(pte)) {
++		pte = pte_mkold(pte);
++		pte = pte_mkencrypted(pte);
++	}
++	return pte;
++}
