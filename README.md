@@ -20,7 +20,9 @@ These patches were created on a Tegra 3 tablet running a customized version of L
 
 To test the system, apply the following patch:
 
-1. user-level-on-soc-setup.patch
+1. ram2ram.patch
+
+2. user-level-on-soc-setup.patch
 
 ## License
 
